@@ -4,7 +4,7 @@
 
 ---
 
-If you work in computational chemistry, you have asked this question a thousand times: "What else looks like this molecule?" A medicinal chemist finds a promising compound, and the immediate follow-up is always about analogs. What is in our library that shares the same scaffold? What known drugs have a similar structure?
+If you work in computational chemistry, you have asked this question many times: "What else looks like this molecule?" A medicinal chemist finds a promising compound, and the immediate follow-up is always about analogs. What is in our library that shares the same scaffold? What known drugs have a similar structure?
 
 For decades, the standard answer was fingerprint-based methods and Tanimoto similarity. Those tools still work, and they are not going anywhere. But they have real blind spots. This walkthrough covers a modern alternative: encoding molecules as dense vector embeddings with a transformer model, indexing them in a vector database built for this kind of search, and retrieving neighbors in milliseconds. Every library used here is on PyPI, and the examples are aligned with the current repository implementation and cited references. The goal is real-world use, not just a notebook demo. Code snippets build on definitions from earlier sections, and Section 10 has the full standalone script you can copy and run.
 
@@ -1111,7 +1111,7 @@ Honestly though? The hard part isn't the engineering. It's deciding what "simila
 
 ---
 
-*All code uses `seyonec/ChemBERTa-zinc-base-v1` from HuggingFace, `qdrant-client` from PyPI, and `rdkit` (formerly `rdkit-pypi`). No custom or imaginary libraries.*
+*All code uses `seyonec/ChemBERTa-zinc-base-v1` from HuggingFace, `qdrant-client` from PyPI, and `rdkit` (formerly `rdkit-pypi`).*
 
 ---
 

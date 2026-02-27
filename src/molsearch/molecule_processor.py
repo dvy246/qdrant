@@ -67,11 +67,11 @@ def validate_and_canonicalize(
     # RDKit descriptors are loaded dynamically and aren't visible to mypy
     payload = {
         "smiles": canonical_smiles,
-        "molecular_weight": round(Descriptors.MolWt(mol), 2),
-        "logp": round(Descriptors.MolLogP(mol), 2),
-        "num_h_donors": Descriptors.NumHDonors(mol),
-        "num_h_acceptors": Descriptors.NumHAcceptors(mol),
-        "tpsa": round(Descriptors.TPSA(mol), 2),
+        "molecular_weight": round(Descriptors.MolWt(mol), 2),  # type: ignore[attr-defined]
+        "logp": round(Descriptors.MolLogP(mol), 2),  # type: ignore[attr-defined]
+        "num_h_donors": Descriptors.NumHDonors(mol),  # type: ignore[attr-defined]
+        "num_h_acceptors": Descriptors.NumHAcceptors(mol),  # type: ignore[attr-defined]
+        "tpsa": round(Descriptors.TPSA(mol), 2),  # type: ignore[attr-defined]
     }
 
     if toxicity_score is not None:

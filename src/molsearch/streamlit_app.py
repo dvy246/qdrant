@@ -106,8 +106,8 @@ if search_clicked:
         with col_info:
             st.subheader("Query Info")
             # RDKit descriptors are loaded dynamically and aren't visible to mypy
-            st.metric("Molecular Weight", f"{Descriptors.MolWt(mol):.2f}")
-            st.metric("LogP", f"{Descriptors.MolLogP(mol):.2f}")
+            st.metric("Molecular Weight", f"{Descriptors.MolWt(mol):.2f}")  # type: ignore[attr-defined]
+            st.metric("LogP", f"{Descriptors.MolLogP(mol):.2f}")  # type: ignore[attr-defined]
 
         st.divider()
 

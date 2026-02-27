@@ -64,12 +64,27 @@ make run-api
 make run-ui
 ```
 
-### 5. Run checks
+### 5. Test and Verify the Integration (Recommended for Reviewers)
+
+To ensure the environment connects to the models and that tests pass locally:
 
 ```bash
+# 1. Run the test suite (validates expected functional behavior)
 make test
-make lint
-mypy src
+
+# 2. Run the end-to-end inference/search pipeline directly in the terminal
+make run-pipeline
+
+# 3. Start the API locally
+make run-api
+
+# 4. In a separate terminal, test the API with cURL
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{"smiles": "CC(=O)Oc1ccccc1C(=O)O", "top_k": 3}'
+
+# 5. Stop the API and run the Web UI (Available at http://localhost:8501)
+make run-ui
 ```
 
 ## API usage

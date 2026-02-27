@@ -284,6 +284,7 @@ def upsert_molecules(
             f"Embedding dimension mismatch: {embeddings.shape[1]} != VECTOR_DIM({VECTOR_DIM})"
         )
 
+    n = len(molecules)
     # skip invalid/nan vectors
     valid_mask = np.ones(n, dtype=bool)
     if np.any(np.isnan(embeddings)):

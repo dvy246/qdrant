@@ -16,7 +16,7 @@ import math
 from contextlib import asynccontextmanager
 from functools import partial
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
@@ -216,8 +216,8 @@ async def search(request: SearchRequest):
 
 
 @app.get("/health")
-def health():
+def health(response: Response):
     """Health check endpoint — verifies model and Qdrant are initialized."""
     health_status = check_system_health(_embedder, _client)
-    status_code = 200 if health_status["status"] == "ok" else 503
+    response.status_code = 200 if health_status["status"] == "ok" else 503
     return health_status

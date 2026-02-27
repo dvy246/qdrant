@@ -306,7 +306,7 @@ def upsert_molecules(
             zip(molecules[start:end], embeddings[start:end], strict=False), start=start
         ):
             if not valid_mask[i]:
-                logger.warning("skipping damaged vector at %d", i)
+                logger.warning("Skipping damaged vector at %d", i)
                 failed_indices.append(i)
                 continue
             try:
@@ -328,7 +328,7 @@ def upsert_molecules(
                     break
                 except Exception as exc:
                     if attempt == 2:
-                        logger.error("upsert %d-%d failed: %s", start, end, exc)
+                        logger.error("Upsert %d-%d failed: %s", start, end, exc)
                         failed_indices.extend(range(start, start + len(points)))
 
     if failed_indices:
@@ -432,9 +432,7 @@ def search_similar_molecules(
         except Exception as exc:
             if attempt == 2:
                 logger.error("Qdrant query failed after 3 attempts: %s", exc)
-                return (
-                    []
-                )  # Graceful degradation: return empty results instead of crashing
+                return []
 
     if results is None:
         return []

@@ -86,7 +86,7 @@ class TestProcessSmilesBatch:
 
         with caplog.at_level(logging.WARNING):
             process_smiles_batch(["INVALID"])
-        assert "Skipping invalid SMILES" in caplog.text
+        assert "skipping invalid smiles" in caplog.text.lower()
 
     def test_toxicity_scores_length_mismatch_raises(self):
         with pytest.raises(ValueError):

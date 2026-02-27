@@ -159,7 +159,7 @@ async def search(request: SearchRequest):
 
     query_smiles = request.smiles.strip()
     if not query_smiles:
-        raise HTTPException(status_code=400, detail="SMILES must not be empty")
+        raise HTTPException(status_code=400, detail="empty smiles")
 
     numeric_filters = {
         "mw_max": request.mw_max,
@@ -168,18 +168,27 @@ async def search(request: SearchRequest):
     }
     for key, value in numeric_filters.items():
         if value is not None and not math.isfinite(value):
-            raise HTTPException(status_code=422, detail=f"{key} must be a finite number")
+            raise HTTPException(
+                status_code=422, detail=f"{key} must be a finite number"
+            )
 
     mol = Chem.MolFromSmiles(query_smiles)
     if mol is None or mol.GetNumAtoms() == 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid SMILES: {request.smiles}",
-        )
+        raise HTTPException(status_code=400, detail="invalid smiles")
 
     canonical = Chem.MolToSmiles(mol)
 
-    # Run the CPU-bound search in a thread pool to avoid blocking async
+    if len(canonical) > 400:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "too_long",
+                "message": "smiles exceeds length limit",
+                "length": len(canonical),
+            },
+        )
+
+    # run in thread pool to avoid blocking async loop
     loop = asyncio.get_running_loop()
     try:
         hits = await loop.run_in_executor(

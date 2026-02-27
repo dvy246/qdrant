@@ -25,28 +25,28 @@ def _env_int(name: str, default: int) -> int:
         parsed = int(value)
         if parsed < 0:
             logging.getLogger(__name__).warning(
-                "Invalid negative value for %s=%r. Using default=%d",
-                name,
-                value,
-                default,
+                "invalid neg value for %s=%r", name, value
             )
-            return default
+            raise ValueError(f"bad env value for {name}: {value}")
         return parsed
-    except ValueError:
-        logging.getLogger(__name__).warning(
-            "Invalid integer for %s=%r. Using default=%d",
-            name,
-            value,
-            default,
-        )
-        return default
+    except ValueError as exc:
+        if "bad env" not in str(exc):
+            logging.getLogger(__name__).warning("invalid int for %s=%r", name, value)
+            raise ValueError(f"bad env value for {name}: {value}") from exc
+        raise
 
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    value_lower = value.strip().lower()
+    if value_lower in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value_lower in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    logging.getLogger(__name__).warning("invalid bool for %s=%r", name, value)
+    raise ValueError(f"bad bool format for {name}: {value}")
 
 
 # ---- Logging ----

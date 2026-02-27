@@ -3,12 +3,6 @@ pipeline.py
 
 End-to-end molecular similarity search pipeline.
 SMILES -> RDKit -> ChemBERTa embeddings -> Qdrant -> search results.
-
-This is a standalone script that demonstrates the full pipeline.
-Run it directly:
-
-    python -m molsearch.pipeline
-    # or via entry point: molsearch
 """
 
 from __future__ import annotations
@@ -39,16 +33,16 @@ def main():
     molecules = process_smiles_batch(SAMPLE_SMILES)
     logger.info("  %d valid molecules.\n", len(molecules))
 
-    # ---- Step 2: Generate embeddings ----
-    logger.info("Step 2: Generating ChemBERTa embeddings...")
+    # ---- Generate embeddings ----
+    logger.info("generating ChemBERTa embeddings...")
     embedder = MoleculeEmbedder()
     smiles_list = [m["smiles"] for m in molecules]
     embeddings = embedder.embed(smiles_list)
     logger.info("  Embedding matrix shape: %s", embeddings.shape)
     logger.info("  Vector norm (first): %.4f\n", np.linalg.norm(embeddings[0]))
 
-    # ---- Step 3: Index in Qdrant ----
-    logger.info("Step 3: Indexing in Qdrant...")
+    # ---- Index in Qdrant ----
+    logger.info("indexing in Qdrant...")
     client = get_qdrant_client()
     create_collection(client)
     upsert_molecules(client, molecules, embeddings)
@@ -57,8 +51,8 @@ def main():
     info = client.get_collection(collection_name=COLLECTION_NAME)
     logger.info("  Collection: %s, %d points\n", info.status, info.points_count)
 
-    # ---- Step 4: Search ----
-    logger.info("Step 4: Similarity search...")
+    # ---- Search ----
+    logger.info("similarity search...")
 
     queries = [
         ("CC(=O)Oc1ccccc1C(=O)O", "Aspirin"),
@@ -82,8 +76,8 @@ def main():
                 f"{hit['molecular_weight']:<10}{hit['logp']}"
             )
 
-    # ---- Step 5: Filtered search demo ----
-    logger.info("\n\nStep 5: Filtered search (MW < 200)...")
+    # ---- Filtered search demo ----
+    logger.info("\n\nfiltered search (MW < 200)...")
     hits = search_similar_molecules(
         query_smiles="CC(=O)Oc1ccccc1C(=O)O",
         embedder=embedder,

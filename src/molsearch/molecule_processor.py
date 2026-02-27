@@ -1,7 +1,5 @@
 """
-Molecule processor: SMILES validation, canonicalization, and descriptor computation.
-
-Uses RDKit for all cheminformatics operations.
+SMILES validation and descriptor computation.
 """
 
 from __future__ import annotations
@@ -21,9 +19,6 @@ def validate_and_canonicalize(
 ) -> dict | None:
     """
     Validate a SMILES string and return canonical form with basic descriptors.
-
-    Returns a dictionary with canonical SMILES and computed molecular
-    descriptors, or None if the SMILES string is invalid.
 
     Args:
         smiles: A SMILES string representing a molecule.
@@ -51,21 +46,22 @@ def validate_and_canonicalize(
     if mol is None:
         return None
 
-    # Reject molecules with zero atoms
+    # Reject molecules with zero atoms or zero bonds (structurally meaningless)
     num_atoms = mol.GetNumAtoms()
-    if num_atoms == 0:
+    if num_atoms == 0 or mol.GetNumBonds() == 0:
+        logger.warning("invalid structure: %s", normalized_smiles)
         return None
 
     try:
         canonical_smiles = Chem.MolToSmiles(mol)
     except Exception:
-        logger.warning("Failed to canonicalize SMILES: %s", normalized_smiles)
+        logger.warning("canonicalization failed: %s", normalized_smiles)
         return None
 
-    # Verify canonical integrity
+    # canonical roundtrip check
     verify_mol = Chem.MolFromSmiles(canonical_smiles)
     if verify_mol is None or verify_mol.GetNumAtoms() != num_atoms:
-        logger.warning("Canonical integrity check failed for: %s", normalized_smiles)
+        logger.warning("canonical integrity check failed: %s", normalized_smiles)
         return None
 
     payload = {
@@ -117,12 +113,12 @@ def process_smiles_batch(
         try:
             result = validate_and_canonicalize(smi, toxicity_score=toxicity_score)
         except ValueError:
-            logger.warning("Skipping SMILES with invalid toxicity score: %s", smi)
+            logger.warning("invalid toxicity score for smiles: %s", smi)
             continue
 
         if result is not None:
             results.append(result)
         else:
-            logger.warning("Skipping invalid SMILES: %s", smi)
+            logger.warning("skipping invalid smiles: %s", smi)
 
     return results

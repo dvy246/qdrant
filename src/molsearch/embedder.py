@@ -1,11 +1,5 @@
 """
-Molecule embedder: ChemBERTa-based SMILES-to-vector embedding.
-
-Uses the seyonec/ChemBERTa-zinc-base-v1 model from HuggingFace with
-mean pooling over the last hidden state to produce dense vectors.
-
-Mean pooling is standard for extracting sequence-level embeddings from
-RoBERTa-family models. We L2-normalize so cosine similarity == dot product.
+ChemBERTa embedding generator.
 """
 
 from __future__ import annotations
@@ -32,11 +26,7 @@ def _get_device() -> torch.device:
 
 class MoleculeEmbedder:
     """
-    Embeds SMILES strings into dense vectors using ChemBERTa.
-
-    Uses mean pooling over the last hidden state (excluding padding tokens)
-    followed by L2 normalization. This produces unit-length vectors suitable
-    for cosine (or dot-product) similarity search.
+    Generates L2-normalized ChemBERTa embeddings from SMILES.
 
     Attributes:
         tokenizer: HuggingFace tokenizer for ChemBERTa.
@@ -49,16 +39,12 @@ class MoleculeEmbedder:
         """
         Initialize the embedder by loading the tokenizer and model.
 
-        Automatically selects GPU (CUDA or MPS) if available, otherwise
-        falls back to CPU.
-
         Args:
             model_name: HuggingFace model identifier.
                         Default: seyonec/ChemBERTa-zinc-base-v1
 
         Raises:
-            ValueError: If the model's hidden size does not match VECTOR_DIM
-                        in config.py. Update VECTOR_DIM when switching models.
+            ValueError: If the model's hidden size does not match VECTOR_DIM.
             OSError: If the model cannot be downloaded (network error, invalid
                      model name, etc.).
         """
@@ -69,12 +55,7 @@ class MoleculeEmbedder:
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.model = AutoModel.from_pretrained(model_name)
         except OSError as exc:
-            logger.error(
-                "Failed to load model '%s'. Check the model name and your "
-                "network connection. Error: %s",
-                model_name,
-                exc,
-            )
+            logger.error("failed to load model %s: %s", model_name, exc)
             raise
 
         self.model.to(self.device)
@@ -88,7 +69,7 @@ class MoleculeEmbedder:
                 f"to match your model before creating a Qdrant collection."
             )
 
-        logger.info("Loaded %s (dim=%d) on %s", model_name, self.vector_dim, self.device)
+        logger.info("loaded %s on %s", model_name, self.device)
 
     def _mean_pool(
         self,
@@ -105,7 +86,9 @@ class MoleculeEmbedder:
         Returns:
             Pooled tensor of shape (batch_size, hidden_dim).
         """
-        mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        mask_expanded = (
+            attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        )
         sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
         sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
         return sum_hidden / sum_mask
@@ -136,12 +119,18 @@ class MoleculeEmbedder:
         if n == 0:
             return np.empty((0, self.vector_dim), dtype=np.float32)
 
-        # Pre-allocate to avoid memory doubling from vstack
+        # pre-allocate to avoid mem spikes
         result = np.empty((n, self.vector_dim), dtype=np.float32)
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             batch = smiles_list[start:end]
+
+            # Pre-tokenization check to avoid crashing the tokenizer with huge inputs
+            if any(len(s) > 400 for s in batch):
+                logger.error("batch %d-%d: smiles too long, skipping", start, end)
+                result[start:end] = np.nan
+                continue
 
             try:
                 encoded = self.tokenizer(
@@ -151,14 +140,14 @@ class MoleculeEmbedder:
                     return_tensors="pt",
                 )
             except Exception as exc:
-                logger.error("Tokenization failed for batch %d-%d: %s", start, end, exc)
-                raise RuntimeError(f"Tokenization failed: {exc}") from exc
+                logger.error("tokenization failed %d-%d: %s", start, end, exc)
+                result[start:end] = np.nan
+                continue
 
             if encoded["input_ids"].shape[1] > 512:
-                raise ValueError(
-                    "One or more SMILES strings exceed the maximum token length of 512 "
-                    "and would be completely biologically invalid if truncated."
-                )
+                logger.error("batch %d-%d: context limit exceeded", start, end)
+                result[start:end] = np.nan
+                continue
 
             # Move input tensors to the same device as the model
             encoded = {k: v.to(self.device) for k, v in encoded.items()}
@@ -178,15 +167,21 @@ class MoleculeEmbedder:
 
                 # Validate embedding integrity
                 if np.any(np.isnan(batch_result)) or np.any(np.isinf(batch_result)):
-                    raise RuntimeError("Generated embeddings contain NaN or Inf values")
+                    logger.error("batch %d-%d: generated nan/inf vectors", start, end)
+                    result[start:end] = np.nan
+                    continue
 
                 result[start:end] = batch_result
 
-            except torch.cuda.OutOfMemoryError as exc:
-                logger.error("OOM during inference for batch %d-%d", start, end)
-                raise RuntimeError(f"Out of memory during inference: {exc}") from exc
+            except torch.cuda.OutOfMemoryError:
+                logger.error("batch %d-%d: OOM, recovering", start, end)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                result[start:end] = np.nan
+                continue
             except Exception as exc:
-                logger.error("Inference failed for batch %d-%d: %s", start, end, exc)
-                raise RuntimeError(f"Model inference failed: {exc}") from exc
+                logger.error("inference failed %d-%d: %s", start, end, exc)
+                result[start:end] = np.nan
+                continue
 
         return result

@@ -48,10 +48,25 @@ def validate_and_canonicalize(
         return None
 
     mol = Chem.MolFromSmiles(normalized_smiles)
-    if mol is None or mol.GetNumAtoms() == 0:
+    if mol is None:
         return None
 
-    canonical_smiles = Chem.MolToSmiles(mol)
+    # Reject molecules with zero atoms
+    num_atoms = mol.GetNumAtoms()
+    if num_atoms == 0:
+        return None
+
+    try:
+        canonical_smiles = Chem.MolToSmiles(mol)
+    except Exception:
+        logger.warning("Failed to canonicalize SMILES: %s", normalized_smiles)
+        return None
+
+    # Verify canonical integrity
+    verify_mol = Chem.MolFromSmiles(canonical_smiles)
+    if verify_mol is None or verify_mol.GetNumAtoms() != num_atoms:
+        logger.warning("Canonical integrity check failed for: %s", normalized_smiles)
+        return None
 
     payload = {
         "smiles": canonical_smiles,

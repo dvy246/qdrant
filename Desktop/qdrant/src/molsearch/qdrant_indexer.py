@@ -38,6 +38,51 @@ from molsearch.embedder import MoleculeEmbedder
 logger = logging.getLogger(__name__)
 
 
+def check_system_health(
+    embedder: MoleculeEmbedder | None,
+    client: QdrantClient | None,
+) -> dict[str, bool | str]:
+    """
+    Perform a lightweight health check on the system.
+
+    Args:
+        embedder: MoleculeEmbedder instance or None.
+        client: QdrantClient instance or None.
+
+    Returns:
+        Dictionary with health status flags:
+            - model_loaded: Whether embedder is initialized
+            - vector_store_reachable: Whether Qdrant is accessible
+            - collection_exists: Whether the collection exists
+            - status: Overall status ("ok", "degraded", "down")
+    """
+    model_loaded = embedder is not None
+    vector_store_reachable = False
+    collection_exists_flag = False
+
+    if client is not None:
+        try:
+            client.get_collections()
+            vector_store_reachable = True
+            collection_exists_flag = client.collection_exists(collection_name=COLLECTION_NAME)
+        except Exception as exc:
+            logger.warning("Health check: Qdrant not reachable: %s", exc)
+
+    if model_loaded and vector_store_reachable and collection_exists_flag:
+        status = "ok"
+    elif model_loaded or vector_store_reachable:
+        status = "degraded"
+    else:
+        status = "down"
+
+    return {
+        "model_loaded": model_loaded,
+        "vector_store_reachable": vector_store_reachable,
+        "collection_exists": collection_exists_flag,
+        "status": status,
+    }
+
+
 def _smiles_to_uuid(smiles: str) -> str:
     """
     Generate a deterministic UUID from a canonical SMILES string.
@@ -85,10 +130,20 @@ def get_qdrant_client() -> QdrantClient:
 
     Returns:
         A QdrantClient instance.
+
+    Raises:
+        RuntimeError: If connection to persistent Qdrant fails.
     """
     if USE_PERSISTENT_QDRANT:
         logger.info("Connecting to Qdrant at %s:%d", QDRANT_HOST, QDRANT_PORT)
-        return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        try:
+            client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=10)
+            # Verify connection
+            client.get_collections()
+            return client
+        except Exception as exc:
+            logger.error("Failed to connect to Qdrant at %s:%d: %s", QDRANT_HOST, QDRANT_PORT, exc)
+            raise RuntimeError(f"Qdrant connection failed: {exc}") from exc
     logger.info("Using in-memory Qdrant client")
     return QdrantClient(":memory:")
 
@@ -237,20 +292,50 @@ def upsert_molecules(
             f"Embedding dimension mismatch: {embeddings.shape[1]} != VECTOR_DIM({VECTOR_DIM})"
         )
 
+    # Validate embedding integrity before upsert
+    if np.any(np.isnan(embeddings)):
+        raise ValueError("Embeddings contain NaN values")
+    if np.any(np.isinf(embeddings)):
+        raise ValueError("Embeddings contain Inf values")
+
+    norms = np.linalg.norm(embeddings, axis=1)
+    if np.any(norms == 0.0):
+        raise ValueError("Embeddings contain zero-norm vectors")
+
     n = len(molecules)
+    failed_indices = []
+
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
-        points = [
-            PointStruct(
-                id=_smiles_to_uuid(mol["smiles"]),
-                vector=emb.tolist(),
-                payload=mol,
-            )
-            for mol, emb in zip(molecules[start:end], embeddings[start:end], strict=False)
-        ]
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        points = []
 
-    logger.info("Upserted %d molecules into '%s'", n, COLLECTION_NAME)
+        for i, (mol, emb) in enumerate(
+            zip(molecules[start:end], embeddings[start:end], strict=False), start=start
+        ):
+            try:
+                points.append(
+                    PointStruct(
+                        id=_smiles_to_uuid(mol["smiles"]),
+                        vector=emb.tolist(),
+                        payload=mol,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to create point for molecule %d: %s", i, exc)
+                failed_indices.append(i)
+
+        if points:
+            try:
+                client.upsert(collection_name=COLLECTION_NAME, points=points)
+            except Exception as exc:
+                logger.error("Batch upsert failed for range %d-%d: %s", start, end, exc)
+                failed_indices.extend(range(start, start + len(points)))
+
+    if failed_indices:
+        logger.warning("Failed to upsert %d molecules: %s", len(failed_indices), failed_indices)
+
+    successful = n - len(failed_indices)
+    logger.info("Upserted %d/%d molecules into '%s'", successful, n, COLLECTION_NAME)
 
 
 def search_similar_molecules(
@@ -289,8 +374,15 @@ def search_similar_molecules(
             - molecular_weight: MW of the hit
             - logp: LogP of the hit
             - toxicity_score: Optional toxicity score if available
+
+    Raises:
+        RuntimeError: If Qdrant query fails.
     """
-    query_vector = embedder.embed([query_smiles])[0].tolist()
+    try:
+        query_vector = embedder.embed([query_smiles])[0].tolist()
+    except Exception as exc:
+        logger.error("Failed to embed query SMILES: %s", exc)
+        raise RuntimeError(f"Query embedding failed: {exc}") from exc
 
     conditions = []
     if mw_max is not None:
@@ -319,13 +411,19 @@ def search_similar_molecules(
 
     # Fetch more candidates to enable re-ranking by fused score
     fetch_limit = top_k * 5
-    results = client.query_points(
-        collection_name=collection_name,
-        query=query_vector,
-        query_filter=query_filter,
-        limit=fetch_limit,
-        with_payload=True,
-    )
+
+    try:
+        results = client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            query_filter=query_filter,
+            limit=fetch_limit,
+            with_payload=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.error("Qdrant query failed: %s", exc)
+        raise RuntimeError(f"Vector search failed: {exc}") from exc
 
     # Compute query ECFP fingerprint for Tanimoto similarity
     query_mol = Chem.MolFromSmiles(query_smiles)

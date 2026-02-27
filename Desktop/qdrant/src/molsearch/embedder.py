@@ -127,6 +127,10 @@ class MoleculeEmbedder:
 
         Returns:
             Numpy array of shape (n, vector_dim) with L2-normalized embeddings.
+
+        Raises:
+            ValueError: If any SMILES exceeds token length limit.
+            RuntimeError: If model inference fails.
         """
         n = len(smiles_list)
         if n == 0:
@@ -139,31 +143,50 @@ class MoleculeEmbedder:
             end = min(start + batch_size, n)
             batch = smiles_list[start:end]
 
-            encoded = self.tokenizer(
-                batch,
-                padding=True,
-                truncation=False,
-                return_tensors="pt",
-            )
+            try:
+                encoded = self.tokenizer(
+                    batch,
+                    padding=True,
+                    truncation=False,
+                    return_tensors="pt",
+                )
+            except Exception as exc:
+                logger.error("Tokenization failed for batch %d-%d: %s", start, end, exc)
+                raise RuntimeError(f"Tokenization failed: {exc}") from exc
 
             if encoded["input_ids"].shape[1] > 512:
                 raise ValueError(
                     "One or more SMILES strings exceed the maximum token length of 512 "
                     "and would be completely biologically invalid if truncated."
                 )
+
             # Move input tensors to the same device as the model
             encoded = {k: v.to(self.device) for k, v in encoded.items()}
 
-            with torch.no_grad():
-                outputs = self.model(**encoded)
+            try:
+                with torch.no_grad():
+                    outputs = self.model(**encoded)
 
-            embeddings = self._mean_pool(
-                outputs.last_hidden_state,
-                encoded["attention_mask"],
-            )
+                embeddings = self._mean_pool(
+                    outputs.last_hidden_state,
+                    encoded["attention_mask"],
+                )
 
-            # L2 normalize so cosine similarity equals dot product
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-            result[start:end] = embeddings.cpu().numpy()
+                # L2 normalize so cosine similarity equals dot product
+                embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+                batch_result = embeddings.cpu().numpy()
+
+                # Validate embedding integrity
+                if np.any(np.isnan(batch_result)) or np.any(np.isinf(batch_result)):
+                    raise RuntimeError("Generated embeddings contain NaN or Inf values")
+
+                result[start:end] = batch_result
+
+            except torch.cuda.OutOfMemoryError as exc:
+                logger.error("OOM during inference for batch %d-%d", start, end)
+                raise RuntimeError(f"Out of memory during inference: {exc}") from exc
+            except Exception as exc:
+                logger.error("Inference failed for batch %d-%d: %s", start, end, exc)
+                raise RuntimeError(f"Model inference failed: {exc}") from exc
 
         return result

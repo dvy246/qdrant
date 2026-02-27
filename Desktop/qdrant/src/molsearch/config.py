@@ -22,7 +22,16 @@ def _env_int(name: str, default: int) -> int:
     if value is None:
         return default
     try:
-        return int(value)
+        parsed = int(value)
+        if parsed < 0:
+            logging.getLogger(__name__).warning(
+                "Invalid negative value for %s=%r. Using default=%d",
+                name,
+                value,
+                default,
+            )
+            return default
+        return parsed
     except ValueError:
         logging.getLogger(__name__).warning(
             "Invalid integer for %s=%r. Using default=%d",

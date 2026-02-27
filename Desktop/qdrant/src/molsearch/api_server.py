@@ -24,6 +24,7 @@ from molsearch.config import MAX_SMILES_LENGTH, SAMPLE_SMILES
 from molsearch.embedder import MoleculeEmbedder
 from molsearch.molecule_processor import process_smiles_batch
 from molsearch.qdrant_indexer import (
+    check_system_health,
     collection_exists_and_populated,
     create_collection,
     create_payload_indexes,
@@ -44,25 +45,36 @@ async def lifespan(app: FastAPI):
     """Initialize embedder and Qdrant on startup, populate demo index."""
     global _embedder, _client
 
-    logger.info("Loading ChemBERTa model...")
-    _embedder = MoleculeEmbedder()
+    try:
+        logger.info("Loading ChemBERTa model...")
+        _embedder = MoleculeEmbedder()
+    except Exception as exc:
+        logger.error("Failed to load embedder: %s", exc)
+        _embedder = None
 
-    logger.info("Initializing Qdrant...")
-    _client = get_qdrant_client()
+    try:
+        logger.info("Initializing Qdrant...")
+        _client = get_qdrant_client()
 
-    # Ensure collection + payload indexes exist on startup.
-    create_collection(_client)
-    create_payload_indexes(_client)
+        # Ensure collection + payload indexes exist on startup.
+        create_collection(_client)
+        create_payload_indexes(_client)
 
-    # Only populate the demo index if the collection doesn't already have data.
-    if not collection_exists_and_populated(_client):
-        molecules = process_smiles_batch(SAMPLE_SMILES)
-        smiles_list = [m["smiles"] for m in molecules]
-        embeddings = _embedder.embed(smiles_list)
-        upsert_molecules(_client, molecules, embeddings)
-        logger.info("Indexed %d demo molecules.", len(molecules))
-    else:
-        logger.info("Collection already populated — skipping demo indexing.")
+        # Only populate the demo index if the collection doesn't already have data.
+        if not collection_exists_and_populated(_client):
+            if _embedder is not None:
+                molecules = process_smiles_batch(SAMPLE_SMILES)
+                smiles_list = [m["smiles"] for m in molecules]
+                embeddings = _embedder.embed(smiles_list)
+                upsert_molecules(_client, molecules, embeddings)
+                logger.info("Indexed %d demo molecules.", len(molecules))
+            else:
+                logger.warning("Embedder not available; skipping demo indexing.")
+        else:
+            logger.info("Collection already populated — skipping demo indexing.")
+    except Exception as exc:
+        logger.error("Failed to initialize Qdrant: %s", exc)
+        _client = None
 
     yield
 
@@ -169,19 +181,23 @@ async def search(request: SearchRequest):
 
     # Run the CPU-bound search in a thread pool to avoid blocking async
     loop = asyncio.get_running_loop()
-    hits = await loop.run_in_executor(
-        None,
-        partial(
-            search_similar_molecules,
-            query_smiles=canonical,
-            embedder=_embedder,
-            client=_client,
-            top_k=request.top_k,
-            mw_max=request.mw_max,
-            logp_max=request.logp_max,
-            toxicity_max=request.toxicity_max,
-        ),
-    )
+    try:
+        hits = await loop.run_in_executor(
+            None,
+            partial(
+                search_similar_molecules,
+                query_smiles=canonical,
+                embedder=_embedder,
+                client=_client,
+                top_k=request.top_k,
+                mw_max=request.mw_max,
+                logp_max=request.logp_max,
+                toxicity_max=request.toxicity_max,
+            ),
+        )
+    except RuntimeError as exc:
+        logger.error("Search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Search failed: {exc}") from exc
 
     return SearchResponse(
         query_smiles=request.smiles,
@@ -193,11 +209,6 @@ async def search(request: SearchRequest):
 @app.get("/health")
 def health():
     """Health check endpoint — verifies model and Qdrant are initialized."""
-    model_ok = _embedder is not None
-    qdrant_ok = _client is not None
-    status = "ok" if (model_ok and qdrant_ok) else "degraded"
-    return {
-        "status": status,
-        "model_loaded": model_ok,
-        "qdrant_connected": qdrant_ok,
-    }
+    health_status = check_system_health(_embedder, _client)
+    status_code = 200 if health_status["status"] == "ok" else 503
+    return health_status

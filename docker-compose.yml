@@ -5,6 +5,11 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   api:
@@ -16,7 +21,8 @@ services:
       - MOLSEARCH_QDRANT_HOST=qdrant
       - MOLSEARCH_QDRANT_PORT=6333
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

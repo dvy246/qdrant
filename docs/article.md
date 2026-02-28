@@ -76,13 +76,22 @@ The whole thing boils down to five steps. Raw SMILES come in, RDKit validates an
 
 I don't want to oversell embeddings. For scaffold-level similarity where you've got well-understood SAR, ECFP4 plus Tanimoto is still hard to beat. But embeddings are worth it when you're exploring unfamiliar chemical space, when you've fine-tuned on your target's activity data, or when your library is big enough that ANN indexing actually saves time over brute-force comparison. This setup defaults to ChemBERTa embeddings, while Mol2Vec/GNN pipelines are practical extensions for teams that need graph-native encoders.
 
-### Why Qdrant
+### Database Selection
 
-There are plenty of vector databases out there (Pinecone, Milvus, Weaviate, ChromaDB). I went with Qdrant for a few practical reasons. It's written in Rust, so memory overhead per vector is low. It has native payload filtering, which means you can say "find me similar molecules, but only ones with MW under 500" in a single query instead of filtering after the fact. The HNSW parameters (`m`, `ef_construct`) are exposed directly so you can tune recall vs. speed. And for development, it runs entirely in-memory through the Python client, no Docker needed.
+While various vector databases exist (e.g., Pinecone, Milvus, Weaviate), this system uses Qdrant due to specific technical requirements:
 
-### Why Cosine Similarity
+- **Memory Efficiency:** Written in Rust, offering low memory overhead per vector.
+- **Native Payload Filtering:** Supports querying by vector similarity and metadata constraints simultaneously (e.g., matching structures with `MW < 500`).
+- **Tunable Indexing:** Exposes HNSW parameters (`m`, `ef_construct`) to balance search recall against latency.
+- **Local Development:** Provides an in-memory Python client, eliminating Docker dependencies for local testing.
 
-Since we L2-normalize all vectors before indexing, cosine similarity and dot product give identical results. We go with cosine because it's bounded between -1 and 1 (which makes thresholds easy to reason about), it's invariant to vector magnitude, and it's what the cheminformatics literature typically reports. Qdrant supports `Distance.COSINE`, `Distance.DOT`, and `Distance.EUCLID`. We use `Distance.COSINE`.
+### Similarity Metrics
+
+Vectors are L2-normalized prior to indexing, making cosine similarity and dot product mathematically equivalent. Cosine similarity is used because:
+
+- It is bounded between -1 and 1, simplifying threshold interpretation.
+- It is invariant to vector magnitude.
+- It is the standard metric reported in cheminformatics literature.
 
 ---
 
@@ -292,9 +301,11 @@ We L2-normalize the vectors so that cosine similarity and dot product give the s
 
 ## 6. Step 3: Index Embeddings in Qdrant
 
-Qdrant lets you store vectors alongside arbitrary JSON payloads. So each molecule's embedding sits right next to its SMILES, molecular weight, LogP, and whatever other properties you care about. Those payload fields become filterable at query time, which is incredibly useful.
+Qdrant stores dense vectors alongside JSON payloads, enabling metadata filtering during similarity search.
 
-For development, we're using Qdrant's in-memory mode. No Docker container, no external server, just the Python client. For production, you'd run Qdrant as a standalone service (more on that in Section 11).
+- **Payload Storage:** Each molecule's embedding is stored with its SMILES string and computed descriptors (MW, LogP, etc.).
+- **Query-Time Filtering:** Payload fields allow direct filtering during vector search, avoiding inefficient post-search filtering.
+- **Development vs. Production:** This implementation uses Qdrant's in-memory mode via the Python client for local development without Docker. Production deployments require a standalone containerized service (see Section 11).
 
 ```python
 from __future__ import annotations
@@ -375,17 +386,13 @@ print(f"Points count: {collection_info.points_count}")
 print(f"Vector size: {collection_info.config.params.vectors.size}")
 ```
 
-**Why upsert instead of insert:** `upsert` is idempotent. If a point with the same ID already exists, it is overwritten. This makes the pipeline safe to re-run without manual cleanup.
+### Indexing Implementation Details
 
-**Warning about `create_collection`:** The function above deletes and recreates the collection if it already exists. This is convenient during development but will destroy production data. In production, either guard this behind a configuration flag or skip deletion when the collection already exists with the correct schema.
-
-**A note on point IDs:** We use `_smiles_to_uuid` to generate deterministic UUID v5 IDs from each molecule's canonical SMILES. This means re-indexing the same molecule overwrites its existing point instead of creating a duplicate or silently colliding with an unrelated molecule. Sequential integer IDs (0, 1, 2...) would break on any incremental re-index.
-
-**Batched upserts:** The snippet above upserts all points in a single call, which is fine for small demo datasets. For large libraries (100k+ molecules), this will consume too much memory. The full repo version in `qdrant_indexer.py` upserts in chunks of `UPSERT_BATCH_SIZE=1000` to stay within memory limits.
-
-**Saving as a module:** Save these functions (along with `search_similar_molecules` from Section 7) as `qdrant_indexer.py`. Sections 8 and 9 import from this module.
-
-**Payload indexing note:** For large collections (>100k points), you should create payload indexes on frequently filtered fields. Qdrant supports keyword, integer, and float payload indexes:
+- **Idempotent Upserts:** Using `upsert` ensures that re-indexing a molecule overwrites its existing entry rather than creating duplicates.
+- **Deterministic IDs:** Point IDs rely on `uuid.uuid5` generated from canonical SMILES, preventing collisions during incremental updates.
+- **Collection Management:** In development, `create_collection` drops existing data. In production, this requires explicit configuration guards.
+- **Batch Processing:** The API upserts in chunks of `UPSERT_BATCH_SIZE=1000` to constrain memory usage for large libraries.
+- **Payload Indexing:** For datasets exceeding 100k points, keyword and float payload indexes significantly improve filter performance.
 
 ```python
 from qdrant_client.models import PayloadSchemaType
@@ -1093,21 +1100,22 @@ Salt forms are another gotcha. SMILES like `[Na+].[Cl-]` or `CC(=O)O.[Na+]` cont
 
 ---
 
-## 13. What to Build Next
+## 13. Future Extensions
 
-Once you've got this working, the obvious next step is fine-tuning ChemBERTa on your own activity data. Contrastive learning works well here: push molecules that hit the same target closer together in embedding space, push inactives apart. That single change will improve your rankings more than anything else.
+Consider the following architectural enhancements for production environments:
 
-Beyond that, you could add fingerprint search as a complementary index and let users switch between the two. You could hook this up to your compound registration system so new molecules get embedded and indexed automatically. Training an ADMET prediction head on top of ChemBERTa embeddings is another natural extension. And if you're feeling ambitious, multi-modal search that combines molecular embeddings with protein pocket embeddings would give you target-aware retrieval.
+- **Contrastive Fine-Tuning:** Fine-tune ChemBERTa using target-specific assay data to improve similarity embeddings (e.g., pulling active molecules closer together).
+- **Hybrid Similarity Indices:** Combining ChemBERTa embeddings with traditional structural fingerprints to allow users to toggle between learned embeddings and explicit sub-structure matches.
+- **Automated Ingestion Pipeline:** Integrating Qdrant upserts directly into compound registration workflows for automatic indexing of novel molecules.
+- **Multimodal Search:** Incorporating protein pocket embeddings to support target-aware retrieval.
 
 ---
 
 ## Conclusion
 
-This isn't meant to replace traditional cheminformatics. Fingerprints and Tanimoto aren't going anywhere, and they shouldn't. But embeddings give you something fingerprints can't: a continuous, learned representation of chemical space where similarity captures more than just substructure overlap.
+Dense vector embeddings offer a learned, continuous representation of chemical space that inherently captures complex property relationships beyond explicit substructure overlap.
 
-Everything here is open-source and actively maintained: RDKit, ChemBERTa, Qdrant, FastAPI, Streamlit. The walkthrough is written to match the current project code and links to primary docs for each component. The examples use in-memory Qdrant and demo data because that's the fastest way to get running. Section 11 covers what changes when you deploy for real, and the complete standalone script in Section 10 runs end-to-end.
-
-Honestly though? The hard part isn't the engineering. It's deciding what "similar" actually means for your specific program. Build this, get it running, and then spend your time on evaluation and fine-tuning. That's where the real payoff is.
+While fingerprint-based methods remain essential for strict structural similarity, transformer-based embeddings provide a powerful complement for scaffold hopping and exploring unfamiliar chemical space. Robust implementation requires careful attention to tokenization limits, indexing parameters, and continuous validation against context-specific assay targets.
 
 ---
 

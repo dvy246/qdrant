@@ -1,5 +1,5 @@
 """
-Tests for embedder.py — ChemBERTa embedding, mean pooling, normalization.
+Tests for embedder.py - ChemBERTa embedding, mean pooling, normalization.
 
 These tests run fully offline by mocking HuggingFace model/tokenizer loading.
 """

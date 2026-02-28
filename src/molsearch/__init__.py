@@ -1,5 +1,5 @@
 """
-molsearch — Molecular similarity search with ChemBERTa and Qdrant.
+molsearch - Molecular similarity search with ChemBERTa and Qdrant.
 
 Provides SMILES validation, ChemBERTa embedding, Qdrant indexing,
 and similarity search for drug discovery workflows.

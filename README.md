@@ -1,6 +1,23 @@
 # Molecule Vector Search with Qdrant
 
-A production-focused molecular similarity search pipeline using ChemBERTa embeddings and Qdrant vector search, with FastAPI and Streamlit interfaces.
+## The Problem: Finding the Right Needles in the Chemical Haystack
+
+In computational chemistry and early-stage drug discovery, a common first step is finding molecular analogs. When you identify a promising hit compound, the immediate next questions are usually: *"What else in our existing library shares this scaffold?"* or *"Which known drugs have a similar structure?"*
+
+Historically, this is solved by generating traditional structural fingerprints (like ECFP4) and comparing them using Tanimoto similarity. While these methods are fast and excellent for explicit substructure matching, they have two major limitations:
+
+1. **They struggle with "scaffold hopping."** Traditional methods are very literal. They might find molecules with the exact same atom-level structure but will completely miss molecules that look visibly different on paper yet behave similarly in a biological context.
+2. **They don't scale well.** Running brute-force O(N) mathematical comparisons against modern chemical libraries containing tens of millions of compounds quickly becomes a severe computational bottleneck.
+
+## The Solution: Semantic Search for Chemistry
+
+This project provides a modern, machine-learning-driven alternative to traditional fingerprinting. It translates molecules into dense vector representations (embeddings) using a chemical-aware transformer model called ChemBERTa. These vectors are then indexed into a specialized, high-performance vector database named Qdrant.
+
+By representing molecules as 768-dimensional vectors, the system learns and captures deep semantic and topological structural patterns that traditional 1D string matching or 2D fingerprints miss. Qdrant provides **approximate nearest neighbor (ANN) retrieval** with latency that scales depending on collection size, hardware, and HNSW index parameters (`m`, `ef`), while simultaneously filtering by medicinal chemistry rules like Molecular Weight, LogP, and Toxicity natively in the database.
+
+This pipeline isn't just about faster software, it's about empowering chemists to find better, non-obvious analogs.
+
+---
 
 ## Architecture
 
@@ -22,15 +39,13 @@ Similarity search API (FastAPI) or Web UI (Streamlit)
 
 ## Features
 
-- SMILES validation and canonicalization with RDKit
-- Dense molecular embeddings via ChemBERTa (768-dimensional)
-- Optional toxicity metadata support (`toxicity_score`) in payloads and filters
-- Qdrant similarity search with cosine distance and deterministic UUID IDs
-- Filtered search by molecular weight, LogP, and toxicity score
-- FastAPI endpoint for programmatic search
-- Streamlit UI for interactive exploration
-- Batch upsert with data-integrity checks
-- Offline-capable unit tests (no required HuggingFace network access)
+- **SMILES Validation:** Ensures clean data ingestion by validating and canonicalizing inputs natively with RDKit.
+- **Deep Embeddings:** Encodes deep structural patterns via 768-dimensional ChemBERTa vectors.
+- **High-Speed Retrieval:** Qdrant similarity search uses cosine distance and deterministic UUIDs to generate sub-second similarity rankings.
+- **Payload Filtering:** Execute metadata-filtered searches concurrently, directly querying by molecular weight, LogP, and toxicity score constraints.
+- **Production APIs:** Ready-to-use FastAPI endpoint for headless integration into other services.
+- **Interactive UI:** A Streamlit interface for hands-on, visual exploration by medicinal chemists.
+- **Robustness:** Includes offline-capable unit tests (no network required) and data-integrity checks for batch upserts.
 
 ## Quick Start
 

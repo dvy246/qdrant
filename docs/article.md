@@ -6,7 +6,7 @@
 
 When a promising compound is identified in computational chemistry, a common subsequent step involves locating analogs, asking: "What else in the existing library shares this scaffold?" or "Which known drugs have a similar structure?"
 
-Historically, fingerprint-based methods and Tanimoto similarity resolved this query. While effective and computationally inexpensive for explicit substructure matching, traditional methods possess notable limitations. This documentation details a modern alternative: encoding molecules as dense vector embeddings via a transformer model, indexing these embeddings in a specialized vector database, and executing sub-millisecond retrieval. All libraries utilized are accessible via PyPI, aligning with the repository's production implementation. Examples prioritize real-world utility over theoretical demonstrations. Code sequences build progressively on prior definitions, culminating in a standalone implementation provided in Section 10.
+Historically, fingerprint-based methods and Tanimoto similarity resolved this query. While effective and computationally inexpensive for explicit substructure matching, traditional methods possess notable limitations. This documentation details a modern alternative: encoding molecules as dense vector embeddings via a transformer model, and indexing these embeddings in a specialized vector database. Retrieval latency remains highly efficient but scales depending on collection size, hardware specs, and chosen HNSW parameters (e.g., `ef_construct`). All libraries utilized are accessible via PyPI, aligning with the repository's production implementation. Examples prioritize real-world utility over theoretical demonstrations. Code sequences build progressively on prior definitions, culminating in a standalone implementation provided in Section 10.
 
 ---
 
@@ -18,7 +18,7 @@ A central challenge in computational chemistry and drug discovery is compound an
 
 This requirement surfaces frequently: querying databases (e.g., ChEMBL or ZINC) for active hit analogs, identifying shared scaffolds within a compound series, verifying whether a promising structure contains a known toxicophore, or broadly exploring adjacent chemical space.
 
-Precision in similarity assessment is critical because chemical synthesis is resource-intensive. Synthesizing a single molecule typically costs between $2,000 and $50,000 depending on structural complexity. An unreliable similarity metric directly leads to misallocated screening and synthesis budgets.
+Precision in similarity assessment mitigates the operational costs of chemical synthesis. Custom synthesis of a single novel compound typically incurs labor and reagent expenses ranging from $3,000 to $5,000 at the milligram scale. An unreliable similarity metric directly leads to misallocated screening and synthesis budgets.
 
 ### The Fingerprint Approach (And Where It Breaks Down)
 
@@ -32,18 +32,18 @@ T(A, B) = |A ∩ B| / |A ∪ B|
 
 While computationally efficient and effective for explicit substructure matching, this approach presents significant limitations in advanced inference:
 
-- **Heuristic Rather Than Learned:** Fingerprints encode predetermined substructure patterns. Consequently, two structurally distinct molecules with identical biological targets may score as entirely dissimilar, hindering "scaffold hopping" efforts.
+- **Heuristic Rather Than Learned:** Fingerprints encode predetermined substructure patterns. Two structurally distinct molecules with identical biological targets can therefore score as entirely dissimilar, hindering "scaffold hopping" efforts.
 - **Information Loss:** Hashing circular substructures into a fixed-length bit vector inevitably leads to collisions, irrevocably discarding structural features.
 - **Blindness to Activity Cliffs:** A minor structural modification, such as adding a single methyl group, can differentiate a highly active inhibitor from an inactive molecule. Tanimoto similarity strictly counts matching bits without recognizing crucial contextual nuance.
 - **Linear Search Complexity:** Exhaustive Tanimoto comparison scales linearly O(N) per query. Searching a 10-million compound library with 1,000 queries requires 10 billion pairwise comparisons, demanding severe optimization.
 
 ### Why Embeddings Outperform Heuristics
 
-Transformer models trained on SMILES strings provide a qualitatively different mechanism: dense vector embeddings where every dimension carries rich information. Unlike sparse binary fingerprints, these vectors are algorithmically learned from data. They internalize patterns in molecular structure that correlate with real physical properties, such as solubility, sequence topology, and biological activity.
+Transformer models trained on SMILES strings take a different approach: dense vector embeddings where structural properties are encoded as distributed representations. Rather than mapping single features to specific dimensions, semantic meaning emerges globally across the vector via polysemantic superposition. Unlike sparse binary fingerprints, these vectors are algorithmically learned from data. They internalize patterns in molecular structure that correlate with real physical properties, such as solubility, sequence topology, and biological activity.
 
 ChemBERTa functions comparably to BERT for natural language text, using SMILES notation as the input syntax. SMILES possesses a defined topological grammar dictating structural connectivity. Transformers demonstrate exceptional capability at internalizing this structure through masked language modeling.
 
-The output is a fixed-size continuous vector per molecule (e.g., 768 dimensions). Similarity is quantified via operations like cosine distance or vector dot product in continuous space. Crucially, because these vectors are dense, approximate nearest neighbor (ANN) retrieval algorithms enable sub-linear search latency when managed by specialized vector databases.
+The output is a fixed-size continuous vector per molecule (e.g., 768 dimensions). Similarity is quantified via cosine distance or dot product in continuous space. Because these vectors are dense, approximate nearest neighbor (ANN) retrieval algorithms enable sub-linear search latency when managed by specialized vector databases.
 
 ---
 
@@ -188,7 +188,7 @@ for smi in drug_smiles:
 print(f"\n{len(molecules)} valid molecules out of {len(drug_smiles)} inputs.")
 ```
 
-Beyond validation, canonicalization ensures that variations like `OC(=O)c1ccccc1OC(C)=O` and `CC(=O)Oc1ccccc1C(=O)O` resolve exclusively to identical canonical SMILES (e.g., aspirin), preventing duplicates in the vector index. The concurrent descriptor calculation computes standard drug-likeness properties (MW, LogP, TPSA, etc.) assigned as Qdrant payload fields, enabling strict criteria filtering during queries (e.g., "retrieve similar molecules with LogP < 5"). Malformed SMILES strings are safely bypassed to prevent pipeline failure.
+Beyond validation, canonicalization ensures that variations like `OC(=O)c1ccccc1OC(C)=O` and `CC(=O)Oc1ccccc1C(=O)O` resolve exclusively to identical canonical SMILES (e.g., aspirin), preventing duplicates in the vector index. The concurrent descriptor calculation computes standard drug-likeness properties (MW, LogP, TPSA, etc.) assigned as Qdrant payload fields, enabling strict criteria filtering during queries. Note that RDKit canonicalization strips stereochemical information if it is not explicitly defined in the input SMILES, which can result in enantiomers being mapped to the exact same vector even if their biological targets radically differ.
 
 For batch processing workflows (implemented by the API and UI in Sections 8 and 9), validation is encapsulated in an iteration loop. The following functions are co-located in `molecule_processor.py`:
 
@@ -288,9 +288,9 @@ print(f"First vector (first 10 dims): {embeddings[0][:10]}")
 print(f"Vector norm (should be ~1.0): {np.linalg.norm(embeddings[0]):.4f}")
 ```
 
-A few notes on the choices here. We use mean pooling instead of just grabbing the `[CLS]` token because ChemBERTa is RoBERTa-based, and RoBERTa's CLS token wasn't trained with a next-sentence prediction objective. Mean pooling across all non-padding tokens is the standard approach for extracting sequence-level representations from BERT-family models when no dedicated embedding head exists. Whether it outperforms CLS for molecular similarity specifically hasn't been rigorously benchmarked in published work, but it's consistent with best practices from the NLP sentence-embedding literature (Reimers & Gurevych, 2019).
+A few architectural notes. Mean pooling is utilized instead of the `[CLS]` token because ChemBERTa is RoBERTa-based, and RoBERTa's CLS token was not trained with a next-sentence prediction objective. Mean pooling across all non-padding tokens is the standard approach for extracting sequence-level representations from BERT-family models when no dedicated embedding head exists. Whether it outperforms CLS for molecular similarity specifically has not been rigorously benchmarked in published work, but it is consistent with best practices from the NLP sentence-embedding literature (Reimers & Gurevych, 2019).
 
-We L2-normalize the vectors so that cosine similarity and dot product give the same results. This keeps things simple and makes scores comparable across queries. And we batch at 32 molecules at a time to balance memory usage against throughput. On a CPU, expect something like 100 to 300 molecules per second, depending on your hardware and how long the SMILES are.
+Vectors are L2-normalized so that cosine similarity and dot product give identical results, keeping scores comparable across queries. Batching is performed at 32 molecules per batch to balance memory usage against throughput. One critical edge case encountered during implementation is that the tokenizer strictly truncates inputs at 512 tokens; molecules exceeding this length will have their sequence silently truncated, resulting in an embedding that only represents a fragment of the full structure.
 
 ---
 
@@ -377,7 +377,7 @@ print(f"Indexed {len(molecules)} molecules in Qdrant.")
 collection_info = client.get_collection(collection_name=COLLECTION_NAME)
 print(f"Collection status: {collection_info.status}")
 print(f"Points count: {collection_info.points_count}")
-# .vectors.size works for single-vector collections (which is what we create here)
+# .vectors.size works for single-vector collections (which is the structure created here)
 print(f"Vector size: {collection_info.config.params.vectors.size}")
 ```
 
@@ -492,7 +492,9 @@ for i, hit in enumerate(results, 1):
     print(f"{i:<6}{hit['smiles']:<45}{hit['score']:<10}{hit['molecular_weight']:<10}{hit['logp']}")
 ```
 
-**Filtered search** is one of Qdrant's strongest features. In drug discovery, you rarely want "the most similar molecule regardless of properties." More often, the question is "find me similar molecules with molecular weight under 500 and LogP under 5" (Lipinski's Rule of Five). Payload filters handle this without post-processing.
+**Filtered search** is one of Qdrant's strongest features. In drug discovery, queries rarely request "the most similar molecule regardless of properties." More commonly, the requirement is "find similar molecules with molecular weight under 500 and LogP under 5" (Lipinski's Rule of Five). Payload filters execute this natively. However, note that configuring too many high-cardinality payload indexes can exponentially increase RAM requirements, which becomes a hard constraint for deployments operating near memory capacity.
+
+The system also applies a hybrid scoring step during retrieval. Latent embedding similarity (cosine distance) is combined with ECFP fingerprint structural similarity (Tanimoto coefficient) into a single `fused_score`, so both learned representations and explicit substructures factor into the final ranking.
 
 ---
 
@@ -576,6 +578,7 @@ class SearchRequest(BaseModel):
     top_k: int = 5
     mw_max: Optional[float] = None
     logp_max: Optional[float] = None
+    toxicity_max: Optional[float] = None
 
 
 class MoleculeHit(BaseModel):
@@ -583,6 +586,9 @@ class MoleculeHit(BaseModel):
     score: float
     molecular_weight: float
     logp: float
+    toxicity_score: Optional[float] = None
+    tanimoto_score: Optional[float] = None
+    fused_score: Optional[float] = None
 
 
 class SearchResponse(BaseModel):
@@ -644,6 +650,8 @@ curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
   -d '{"smiles": "CC(=O)Oc1ccccc1C(=O)O", "top_k": 3}'
 ```
+
+Note that this API implementation binds the heavy ChemBERTa inference to the same process running the web server. Under concurrent load, even with `run_in_executor`, GIL contention during tensor manipulation can degrade API throughput significantly.
 
 ---
 
@@ -1077,15 +1085,12 @@ client = QdrantClient(host="localhost", port=6333)
 
 ## 12. Architecture Limitations
 
-This approach exhibits inherent technical limitations that require mitigation in production environments:
+During implementation and stress testing, several operational constraints emerged that limit the current system. These must be accounted for before large-scale usage:
 
-- **Lack of 3D Awareness:** ChemBERTa parses 1D SMILES strings to infer 2D topological patterns. It lacks intrinsic understanding of 3D conformation. For targets dominated by shape complementarity, this pipeline must be combined with 3D-aware models or explicit shape-based screening methods.
-- **Task-Agnostic Baseline:** The base model was trained via masked language modeling on the ZINC database without activity data. Untuned similarity rankings serve as a baseline; fine-tuning on target-specific assay data is strictly required for optimal retrieval performance.
-- **Canonicalization Strictness:** Canonical SMILES strings can vary structurally across RDKit versions. Version parity between indexing and query environments is mandatory to prevent embedding divergence for identical molecules.
-- **Approximate Search Constraints:** HNSW search is inherently approximate and does not mathematically guarantee returning the absolute nearest neighbor. For high-precision requirements, increase the `ef` parameter at query time or execute an exact k-NN reranking step on the retrieved shortlist.
-- **Contextual Similarity:** "Similarity" is contextual. Structurally identical molecules can exhibit disparate biological activity (activity cliffs), while structurally dissimilar molecules can share targets (scaffold hopping). Vector retrieval should be empirically benchmarked against specific internal assay datasets or standard benchmarks like MoleculeNet.
-- **Sequence Truncation:** The utilized tokenizer strictly truncates inputs at 512 tokens. Macromolecules, lengthy polymers, or complex natural products exceeding this limit will yield truncated embeddings, degrading representation fidelity. Production systems should explicitly validate token counts prior to embedding.
-- **Salt Forms and Solvents:** `Chem.MolFromSmiles` parses disconnected fragments (e.g., `[Na+].[Cl-]` or `CC(=O)O.[Na+]`) without error. Embeddings generated from unbroken mixtures will encode uninteresting counterions alongside the active pharmaceutical ingredient. Production implementations must strictly integrate `rdkit.Chem.SaltRemover.SaltRemover` during the preprocessing stage.
+- **HNSW Recall vs. Resource Tradeoffs:** We observed that retrieving the *absolute* nearest neighbor is not mathematically guaranteed under default HNSW parameters. During validation, a highly similar structural analog was entirely omitted from the top-10 results until we increased the `ef` search parameter, which subsequently doubled the query latency.
+- **Activity Cliffs vs. Semantic Similarity:** We found instances where the embedding space failed to distinguish critical functional nuances. For example, adding a single methyl group drastically changes a compound's toxicity, but ChemBERTa still placed both variants extremely close together in vector space. Relying solely on this distance can yield biologically invalid analogues.
+- **Tokenizer Ceiling Limits:** The model critically failed to represent large molecules. A macrocyclic peptide we ingested exceeded 512 characters in SMILES format; the tokenizer silently truncated the tail end. The resulting embedding only represented a fragment of the structure, leading to completely nonsensical nearest neighbors during retrieval.
+- **Counterion Contamination:** Because `Chem.MolFromSmiles` naively accepts fragmented strings like `CC(=O)O.[Na+]`, we discovered our vector index was effectively encoding sodium counterions alongside the active pharmaceutical ingredients. Searching for similar active ingredients occasionally returned unrelated drug salts merely because both contained `[Na+]`.
 
 ---
 
@@ -1094,7 +1099,6 @@ This approach exhibits inherent technical limitations that require mitigation in
 Consider the following architectural enhancements for production environments:
 
 - **Contrastive Fine-Tuning:** Fine-tune ChemBERTa using target-specific assay data to improve similarity embeddings (e.g., pulling active molecules closer together).
-- **Hybrid Similarity Indices:** Combining ChemBERTa embeddings with traditional structural fingerprints to allow users to toggle between learned embeddings and explicit sub-structure matches.
 - **Automated Ingestion Pipeline:** Integrating Qdrant upserts directly into compound registration workflows for automatic indexing of novel molecules.
 - **Multimodal Search:** Incorporating protein pocket embeddings to support target-aware retrieval.
 

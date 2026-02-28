@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
             else:
                 logger.warning("Embedder not available; skipping demo indexing.")
         else:
-            logger.info("Collection already populated — skipping demo indexing.")
+            logger.info("Collection already populated - skipping demo indexing.")
     except Exception as exc:
         logger.error("Failed to initialize Qdrant: %s", exc)
         _client = None
@@ -217,7 +217,7 @@ async def search(request: SearchRequest):
 
 @app.get("/health")
 def health(response: Response):
-    """Health check endpoint — verifies model and Qdrant are initialized."""
+    """Health check endpoint - verifies model and Qdrant are initialized."""
     health_status = check_system_health(_embedder, _client)
     response.status_code = 200 if health_status["status"] == "ok" else 503
     return health_status

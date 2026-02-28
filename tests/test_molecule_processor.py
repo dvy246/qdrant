@@ -1,5 +1,5 @@
 """
-Tests for molecule_processor.py — SMILES validation, canonicalization, descriptors.
+Tests for molecule_processor.py - SMILES validation, canonicalization, descriptors.
 """
 
 from __future__ import annotations

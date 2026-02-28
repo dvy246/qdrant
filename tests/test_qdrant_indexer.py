@@ -1,5 +1,5 @@
 """
-Tests for qdrant_indexer.py — collection management, upsert, and search.
+Tests for qdrant_indexer.py - collection management, upsert, and search.
 
 Uses an in-memory Qdrant client so no server is required.
 """

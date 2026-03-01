@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Divya Yadav"},
+    {name = "Divy Yadav"},
 ]
 keywords = ["cheminformatics", "drug-discovery", "vector-search", "qdrant", "chemberta"]
 classifiers = [

@@ -46,7 +46,6 @@ def validate_and_canonicalize(
     if mol is None:
         return None
 
-    # structurally meaningless
     num_atoms = mol.GetNumAtoms()
     if num_atoms == 0 or mol.GetNumBonds() == 0:
         logger.warning("invalid structure: %s", normalized_smiles)
@@ -58,7 +57,6 @@ def validate_and_canonicalize(
         logger.warning("canonicalization failed: %s", normalized_smiles)
         return None
 
-    # roundtrip check
     verify_mol = Chem.MolFromSmiles(canonical_smiles)
     if verify_mol is None or verify_mol.GetNumAtoms() != num_atoms:
         logger.warning("canonical integrity check failed: %s", normalized_smiles)

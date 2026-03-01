@@ -26,7 +26,7 @@ from molsearch.qdrant_indexer import (
     upsert_molecules,
 )
 
-# ---- Page config ----
+
 st.set_page_config(page_title="Molecule Similarity Search", layout="wide")
 st.title("Molecule Similarity Search")
 st.caption("Powered by ChemBERTa embeddings and Qdrant vector search")
@@ -52,7 +52,7 @@ def load_resources():
 
 embedder, client = load_resources()
 
-# ---- Sidebar controls ----
+
 st.sidebar.header("Search Parameters")
 
 query_smiles = st.sidebar.text_input(
@@ -86,7 +86,6 @@ toxicity_filter = st.sidebar.number_input(
 search_clicked = st.sidebar.button("Search", type="primary", use_container_width=True)
 
 
-# ---- Main content ----
 if search_clicked:
     query_smiles = query_smiles.strip()
     mol = Chem.MolFromSmiles(query_smiles)

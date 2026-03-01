@@ -108,14 +108,12 @@ class MoleculeEmbedder:
         if n == 0:
             return np.empty((0, self.vector_dim), dtype=np.float32)
 
-        # pre-allocate to avoid mem spikes
         result = np.empty((n, self.vector_dim), dtype=np.float32)
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             batch = smiles_list[start:end]
 
-            # bail on absurdly long smiles
             if any(len(s) > 400 for s in batch):
                 logger.error("batch %d-%d: smiles too long, skipping", start, end)
                 result[start:end] = np.nan

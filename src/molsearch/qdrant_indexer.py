@@ -111,7 +111,6 @@ def get_qdrant_client() -> QdrantClient:
         logger.info("Connecting to Qdrant at %s:%d", QDRANT_HOST, QDRANT_PORT)
         try:
             client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=10)
-            # quick connection check
             client.get_collections()
             return client
         except Exception as exc:
@@ -265,7 +264,6 @@ def upsert_molecules(
         )
 
     n = len(molecules)
-    # drop bad vectors
     valid_mask = np.ones(n, dtype=bool)
     if np.any(np.isnan(embeddings)):
         valid_mask &= ~np.isnan(embeddings).any(axis=1)
@@ -394,7 +392,6 @@ def search_similar_molecules(
 
     query_filter = Filter(must=conditions) if conditions else None  # type: ignore[arg-type]
 
-    # fetch extra for re-ranking
     fetch_limit = top_k * 5
 
     results = None

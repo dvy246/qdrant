@@ -268,7 +268,6 @@ class MoleculeEmbedder:
                 encoded["attention_mask"],
             )
             
-            # L2 normalize for cosine similarity
             embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
             all_embeddings.append(embeddings.cpu().numpy())
         
@@ -370,11 +369,9 @@ upsert_molecules(client, molecules, embeddings)
 
 print(f"Indexed {len(molecules)} molecules in Qdrant.")
 
-# Verify the collection
 collection_info = client.get_collection(collection_name=COLLECTION_NAME)
 print(f"Collection status: {collection_info.status}")
 print(f"Points count: {collection_info.points_count}")
-# .vectors.size works for single-vector collections (which is the structure created here)
 print(f"Vector size: {collection_info.config.params.vectors.size}")
 ```
 
@@ -427,17 +424,14 @@ def search_similar_molecules(
     Search for molecules similar to the query SMILES.
     Optionally filter by molecular weight and LogP.
     """
-    # Validate input
     mol = Chem.MolFromSmiles(query_smiles)
     if mol is None:
         raise ValueError(f"Invalid SMILES: {query_smiles}")
     
     canonical = Chem.MolToSmiles(mol)
     
-    # Embed the query
     query_vector = embedder.embed([canonical])[0].tolist()
     
-    # Build optional filters
     conditions = []
     if mw_max is not None:
         conditions.append(
@@ -456,7 +450,6 @@ def search_similar_molecules(
     
     query_filter = Filter(must=conditions) if conditions else None
     
-    # Search
     results = client.query_points(
         collection_name=collection_name,
         query=query_vector,
@@ -465,7 +458,6 @@ def search_similar_molecules(
         with_payload=True,
     )
     
-    # Format results
     hits = []
     for point in results.points:
         hits.append({
@@ -524,7 +516,6 @@ from qdrant_indexer import (
     upsert_molecules,
 )
 
-# Module-level references populated during lifespan
 _embedder = None
 _client = None
 
@@ -536,7 +527,6 @@ async def lifespan(app: FastAPI):
     _embedder = MoleculeEmbedder()
     _client = get_qdrant_client()
 
-    # Populate demo index so /search works out of the box
     sample_smiles = [
         "CC(=O)Oc1ccccc1C(=O)O",              # Aspirin
         "CC(C)Cc1ccc(cc1)C(C)C(=O)O",          # Ibuprofen
@@ -680,7 +670,6 @@ st.set_page_config(page_title="Molecule Similarity Search", layout="wide")
 st.title("Molecule Similarity Search")
 st.caption("Powered by ChemBERTa embeddings and Qdrant vector search")
 
-# Sample molecules imported from centralized config
 from config import SAMPLE_SMILES
 
 
@@ -690,7 +679,6 @@ def load_resources():
     emb = MoleculeEmbedder()
     qclient = get_qdrant_client()
 
-    # Populate the demo index so searches work out of the box
     molecules = process_smiles_batch(SAMPLE_SMILES)
     smiles_list = [m["smiles"] for m in molecules]
     embeddings = emb.embed(smiles_list)

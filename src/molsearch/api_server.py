@@ -35,7 +35,7 @@ from molsearch.qdrant_indexer import (
 
 logger = logging.getLogger(__name__)
 
-# Module-level references populated during lifespan
+
 _embedder: MoleculeEmbedder | None = None
 _client = None
 
@@ -88,9 +88,6 @@ app = FastAPI(
 )
 
 
-# ---- Request / Response models ----
-
-
 class SearchRequest(BaseModel):
     """Request body for the /search endpoint."""
 
@@ -138,9 +135,6 @@ class SearchResponse(BaseModel):
     query_smiles: str
     canonical_smiles: str
     results: list[MoleculeHit]
-
-
-# ---- Endpoints ----
 
 
 @app.post("/search", response_model=SearchResponse)

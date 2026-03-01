@@ -79,7 +79,7 @@ make run-api
 make run-ui
 ```
 
-### 5. Test and Verify the Integration (Recommended for Reviewers)
+### 5. Test and Verify the Integration 
 
 To ensure the environment connects to the models and that tests pass locally:
 

@@ -1,5 +1,7 @@
 # Molecule Vector Search with Qdrant
 
+![vec](https://github.com/user-attachments/assets/72550bcd-d35d-43c7-b315-0f781b805186)
+
 ## The Problem: Finding the Right Needles in the Chemical Haystack
 
 In computational chemistry and early-stage drug discovery, a common first step is finding molecular analogs. When you identify a promising hit compound, the immediate next questions are usually: *"What else in our existing library shares this scaffold?"* or *"Which known drugs have a similar structure?"*

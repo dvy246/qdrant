@@ -3,9 +3,9 @@
 *How to build a molecular similarity search system with ChemBERTa, RDKit, and Qdrant*
 
 ---
-When a promising compound is found in computational chemistry, the next step is often to find similar compounds. This involves questions like, "What else in the existing library has this structure?" or "Which known drugs are similar?"
+In computational chemistry, if a promising compound is found, the next step is usually to find similar compounds. This raises questions such as: “What other things in the existing library share this structure? or “What known drugs are similar?”
 
-In the past, fingerprint-based methods and Tanimoto similarity answered this question. These methods were effective and inexpensive for matching clear substructures, but they had significant limitations. This document describes a modern alternative: encoding molecules as dense vector embeddings using a transformer model and storing these embeddings in a specialized vector database. Retrieval times are very efficient but depend on the collection size, hardware specifications, and selected HNSW parameters, such as `ef_construct`. All libraries used are available via PyPI, matching the repository's production setup. The examples focus on real-world use rather than theoretical explanations. The code builds progressively on previous definitions, leading to a complete implementation provided in Section 10.
+Previously, this question was answered using fingerprint-based methods and Tanimoto similarity. While these methods were effective and cheap for matching clear substructures, they faced major limitations. This document will describe a modern approach: encoding molecules with dense vector embeddings using a transformer model and storing those embeddings in an appropriate vector database. The retrieval times are highly efficient, though they scale with the collection size, hardware specifications, and selected HNSW parameters, such as `ef_construct`. All libraries used are available via PyPI, matching the repository's production setup. The examples focus on real-world use rather than theoretical explanations. The code builds progressively on previous definitions, leading to a complete implementation provided in Section 10.
 
 ---
 
@@ -15,7 +15,7 @@ In the past, fingerprint-based methods and Tanimoto similarity answered this que
 
 A key challenge in computational chemistry and drug discovery is identifying compound analogs. After finding an active hit against a target, medicinal chemists need to quickly find compounds with the same core structure from a specific library.
 
-This need arises often. It includes querying databases like ChEMBL or ZINC for active hit analogs, identifying shared scaffolds within a series of compounds, checking if a promising structure has a known toxic group, or exploring related chemical space.
+I think this need arises often. It includes querying databases like ChEMBL or ZINC for active hit analogs, identifying shared scaffolds within a series of compounds, checking if a promising structure has a known toxic group, or exploring related chemical space.
 
 Accurate similarity assessment helps reduce the costs of chemical synthesis. Custom synthesis of a single new compound usually costs between $3,000 and $5,000 at the milligram scale. If the similarity measure is unreliable, it leads to poor spending on screening and synthesis.
 
@@ -81,7 +81,7 @@ There are many vector databases available, such as Pinecone, Milvus, and Weaviat
 
 ### Similarity Metrics
 
-Vectors are L2-normalized before indexing, which makes cosine similarity and dot product mathematically the same. Cosine similarity is preferred because:
+Vectors are L2-normalised before indexing, which makes cosine similarity and dot product mathematically the same. Cosine similarity is preferred because:
 
 - It ranges between -1 and 1, making it easy to interpret thresholds.
 - It does not depend on vector size.

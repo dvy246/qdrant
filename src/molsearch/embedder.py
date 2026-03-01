@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_device() -> torch.device:
-    """Select the best available device (CUDA > MPS > CPU)."""
+    """Pick best available torch device."""
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -72,20 +72,9 @@ class MoleculeEmbedder:
         logger.info("loaded %s on %s", model_name, self.device)
 
     def _mean_pool(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Mean pool hidden states, masking out padding tokens.
-
-        Args:
-            hidden_states: Tensor of shape (batch_size, seq_len, hidden_dim).
-            attention_mask: Tensor of shape (batch_size, seq_len).
-
-        Returns:
-            Pooled tensor of shape (batch_size, hidden_dim).
-        """
+        """Average hidden states across non-padding tokens."""
         mask_expanded = (
             attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
         )
@@ -126,7 +115,7 @@ class MoleculeEmbedder:
             end = min(start + batch_size, n)
             batch = smiles_list[start:end]
 
-            # Pre-tokenization check to avoid crashing the tokenizer with huge inputs
+            # bail on absurdly long smiles
             if any(len(s) > 400 for s in batch):
                 logger.error("batch %d-%d: smiles too long, skipping", start, end)
                 result[start:end] = np.nan
@@ -149,7 +138,6 @@ class MoleculeEmbedder:
                 result[start:end] = np.nan
                 continue
 
-            # Move input tensors to the same device as the model
             encoded = {k: v.to(self.device) for k, v in encoded.items()}
 
             try:
@@ -161,11 +149,10 @@ class MoleculeEmbedder:
                     encoded["attention_mask"],
                 )
 
-                # L2 normalize so cosine similarity equals dot product
+                # L2 normalize so dot product == cosine
                 embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
                 batch_result = embeddings.cpu().numpy()
-
-                # Validate embedding integrity
+                # TODO: benchmark whether batch_size=64 is faster on GPU
                 if np.any(np.isnan(batch_result)) or np.any(np.isinf(batch_result)):
                     logger.error("batch %d-%d: generated nan/inf vectors", start, end)
                     result[start:end] = np.nan

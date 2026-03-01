@@ -41,7 +41,6 @@ def load_resources():
     create_collection(client)
     create_payload_indexes(client)
 
-    # Only populate if the collection is empty or missing
     if not collection_exists_and_populated(client):
         molecules = process_smiles_batch(SAMPLE_SMILES)
         smiles_list = [m["smiles"] for m in molecules]
@@ -97,7 +96,6 @@ if search_clicked:
     else:
         canonical_query = Chem.MolToSmiles(mol)
 
-        # Display query molecule
         col_query, col_info = st.columns([1, 2])
         with col_query:
             st.subheader("Query Molecule")
@@ -111,7 +109,6 @@ if search_clicked:
 
         st.divider()
 
-        # Run search
         mw_max = mw_filter if mw_filter > 0 else None
         logp_max = logp_filter if logp_filter > 0 else None
         toxicity_max = toxicity_filter if toxicity_filter > 0 else None

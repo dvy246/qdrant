@@ -28,21 +28,18 @@ logger = logging.getLogger(__name__)
 def main():
     """Run the full molecule search pipeline."""
 
-    # ---- Step 1: Process SMILES ----
-    logger.info("Step 1: Processing SMILES...")
+    logger.info("Processing SMILES...")
     molecules = process_smiles_batch(SAMPLE_SMILES)
     logger.info("  %d valid molecules.\n", len(molecules))
 
-    # ---- Generate embeddings ----
-    logger.info("generating ChemBERTa embeddings...")
+    logger.info("Generating ChemBERTa embeddings...")
     embedder = MoleculeEmbedder()
     smiles_list = [m["smiles"] for m in molecules]
     embeddings = embedder.embed(smiles_list)
     logger.info("  Embedding matrix shape: %s", embeddings.shape)
     logger.info("  Vector norm (first): %.4f\n", np.linalg.norm(embeddings[0]))
 
-    # ---- Index in Qdrant ----
-    logger.info("indexing in Qdrant...")
+    logger.info("Indexing in Qdrant...")
     client = get_qdrant_client()
     create_collection(client)
     upsert_molecules(client, molecules, embeddings)
@@ -51,8 +48,7 @@ def main():
     info = client.get_collection(collection_name=COLLECTION_NAME)
     logger.info("  Collection: %s, %d points\n", info.status, info.points_count)
 
-    # ---- Search ----
-    logger.info("similarity search...")
+    logger.info("Running similarity search...")
 
     queries = [
         ("CC(=O)Oc1ccccc1C(=O)O", "Aspirin"),
@@ -76,8 +72,7 @@ def main():
                 f"{hit['molecular_weight']:<10}{hit['logp']}"
             )
 
-    # ---- Filtered search demo ----
-    logger.info("\n\nfiltered search (MW < 200)...")
+    logger.info("\n\nFiltered search (MW < 200)...")
     hits = search_similar_molecules(
         query_smiles="CC(=O)Oc1ccccc1C(=O)O",
         embedder=embedder,

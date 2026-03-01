@@ -42,7 +42,7 @@ _client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize embedder and Qdrant on startup, populate demo index."""
+    """Startup: load model, connect Qdrant, seed demo data if empty."""
     global _embedder, _client
 
     try:
@@ -56,11 +56,9 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing Qdrant...")
         _client = get_qdrant_client()
 
-        # Ensure collection + payload indexes exist on startup.
         create_collection(_client)
         create_payload_indexes(_client)
 
-        # Only populate the demo index if the collection doesn't already have data.
         if not collection_exists_and_populated(_client):
             if _embedder is not None:
                 molecules = process_smiles_batch(SAMPLE_SMILES)
@@ -217,7 +215,7 @@ async def search(request: SearchRequest):
 
 @app.get("/health")
 def health(response: Response):
-    """Health check endpoint - verifies model and Qdrant are initialized."""
+    """Liveness probe."""
     health_status = check_system_health(_embedder, _client)
     response.status_code = 200 if health_status["status"] == "ok" else 503
     return health_status

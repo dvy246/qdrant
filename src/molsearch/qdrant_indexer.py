@@ -42,20 +42,7 @@ def check_system_health(
     embedder: MoleculeEmbedder | None,
     client: QdrantClient | None,
 ) -> dict[str, bool | str]:
-    """
-    Perform a lightweight health check on the system.
-
-    Args:
-        embedder: MoleculeEmbedder instance or None.
-        client: QdrantClient instance or None.
-
-    Returns:
-        Dictionary with health status flags:
-            - model_loaded: Whether embedder is initialized
-            - vector_store_reachable: Whether Qdrant is accessible
-            - collection_exists: Whether the collection exists
-            - status: Overall status ("ok", "degraded", "down")
-    """
+    """Quick health check -- returns status dict with 'ok', 'degraded', or 'down'."""
     model_loaded = embedder is not None
     vector_store_reachable = False
     collection_exists_flag = False
@@ -86,23 +73,18 @@ def check_system_health(
 
 
 def _smiles_to_uuid(smiles: str) -> str:
-    """
-    Generate deterministic UUID from canonical SMILES.
-    Safe for incremental upserts (overwrites instead of duplicating).
-    """
-    namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # URL namespace
+    """Deterministic UUID from canonical SMILES -- safe for incremental upserts."""
+    namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
     return str(uuid.uuid5(namespace, smiles))
 
 
 def _extract_vector_size(collection_info: Any) -> int | None:
-    """Extract vector size from a collection config if available."""
+    """Pull vector size from collection config, if available."""
     vectors = collection_info.config.params.vectors
-    # Single-vector collections expose .size
     size = getattr(vectors, "size", None)
     if isinstance(size, int):
         return size
 
-    # Named vectors are exposed as a dict-like mapping
     if isinstance(vectors, dict) and vectors:
         first = next(iter(vectors.values()))
         named_size = getattr(first, "size", None)
@@ -224,7 +206,6 @@ def collection_exists_and_populated(client: QdrantClient) -> bool:
 
 
 def create_payload_indexes(client: QdrantClient) -> None:
-    # optional payload indexes for filtering
     indexed_fields = [
         "molecular_weight",
         "logp",
@@ -239,7 +220,6 @@ def create_payload_indexes(client: QdrantClient) -> None:
                 field_schema=PayloadSchemaType.FLOAT,
             )
         except Exception as exc:
-            # Index creation should not break startup when optional fields are absent.
             logger.warning(
                 "Could not create payload index for '%s': %s", field_name, exc
             )
@@ -285,7 +265,7 @@ def upsert_molecules(
         )
 
     n = len(molecules)
-    # skip invalid/nan vectors
+    # drop bad vectors
     valid_mask = np.ones(n, dtype=bool)
     if np.any(np.isnan(embeddings)):
         valid_mask &= ~np.isnan(embeddings).any(axis=1)
@@ -437,7 +417,6 @@ def search_similar_molecules(
     if results is None:
         return []
 
-    # Compute query ECFP fingerprint for Tanimoto similarity
     query_mol = Chem.MolFromSmiles(query_smiles)
     if query_mol is not None:
         generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
@@ -451,7 +430,6 @@ def search_similar_molecules(
         toxicity = payload.get("toxicity_score")
         hit_smiles = payload.get("smiles", "")
 
-        # Compute hit ECFP fingerprint and Tanimoto similarity
         tanimoto = 0.0
         if query_fp is not None and hit_smiles:
             hit_mol = Chem.MolFromSmiles(hit_smiles)
@@ -459,7 +437,7 @@ def search_similar_molecules(
                 hit_fp = generator.GetFingerprint(hit_mol)
                 tanimoto = DataStructs.TanimotoSimilarity(query_fp, hit_fp)
 
-        # Hybrid similarity: average of latent cosine and Tanimoto
+        # TODO: make fusion weights configurable
         fused_score = 0.5 * point.score + 0.5 * tanimoto
 
         hits.append(
@@ -476,6 +454,5 @@ def search_similar_molecules(
             }
         )
 
-    # Re-sort hits by fused score descending and slice to top_k
     hits.sort(key=lambda x: x["fused_score"], reverse=True)
     return hits[:top_k]

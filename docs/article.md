@@ -6,6 +6,7 @@
 When a promising compound is found in computational chemistry, the next step is often to find similar compounds. This involves questions like, "What else in the existing library has this structure?" or "Which known drugs are similar?"
 
 In the past, fingerprint-based methods and Tanimoto similarity answered this question. These methods were effective and inexpensive for matching clear substructures, but they had significant limitations. This document describes a modern alternative: encoding molecules as dense vector embeddings using a transformer model and storing these embeddings in a specialized vector database. Retrieval times are very efficient but depend on the collection size, hardware specifications, and selected HNSW parameters, such as `ef_construct`. All libraries used are available via PyPI, matching the repository's production setup. The examples focus on real-world use rather than theoretical explanations. The code builds progressively on previous definitions, leading to a complete implementation provided in Section 10.
+
 ---
 
 ## 1. The Real Problem in Drug Discovery
@@ -1100,6 +1101,7 @@ Here are some possible improvements for production environments:
 - **Contrastive Fine-Tuning:** Fine-tune ChemBERTa using specific assay data to better the similarity embeddings, such as bringing active molecules closer together. 
 - **Automated Ingestion Pipeline:** Connect Qdrant updates directly into compound registration workflows for automatic indexing of new molecules.
 - **Multimodal Search:** Add protein pocket embeddings to enhance target-aware retrieval.
+  
 ---
 
 ## Conclusion

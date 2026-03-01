@@ -97,7 +97,7 @@ All dependencies are sourced directly from PyPI; no custom forks or proprietary 
 # Core cheminformatics
 pip install rdkit
 
-# Transformer framework and tokenizer
+# Transformer framework and tokenizer and Pytorch
 pip install transformers torch
 
 # Vector database client (requires Qdrant server v1.10+ for the Query API)
@@ -111,7 +111,7 @@ pip install streamlit
 
 - **RDKit Package Naming:** The canonical PyPI package name is `rdkit` (previously published as `rdkit-pypi`).
 - **Python Version Requirements:** Python 3.10 or greater is mandatory. The codebase leverages the `X | Y` union type syntax (e.g., `dict | None`) introduced in PEP 604. (Note: Python 3.9 reached end-of-life in October 2025).
-- **Hardware Specifications:** ChemBERTa executes reliably on standard CPUs for smaller datasets (up to approximately 100k molecules). For larger libraries, GPU-accelerated inference with dynamic batching is strongly recommended.
+- **Hardware Specifications:** ChemBERTa executes reliably on standard CPUs for smaller datasets (up to approximately 100k molecules). For larger libraries, GPU-accelerated inference with dynamic batching is recommended.
 
 Verify the environment installation:
 
@@ -687,9 +687,6 @@ def load_resources():
 
     return emb, qclient
 
-# NOTE: The snippet above calls create_collection() unconditionally, which
-# wipes the index on every Streamlit reload. The full repo version guards
-# this with collection_exists_and_populated() -- see streamlit_app.py.
 
 embedder, client = load_resources()
 
@@ -777,16 +774,12 @@ from transformers import AutoTokenizer, AutoModel
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
 MODEL_NAME = "seyonec/ChemBERTa-zinc-base-v1"
 COLLECTION_NAME = "molecules"
 BATCH_SIZE = 32
 
-# ---------------------------------------------------------------
+
 # Step 1: Molecule validation and canonicalization
-# ---------------------------------------------------------------
 def process_smiles(smiles_list: list[str]) -> list[dict]:
     """Validate and canonicalize SMILES. Compute basic descriptors."""
     results = []
@@ -805,9 +798,7 @@ def process_smiles(smiles_list: list[str]) -> list[dict]:
         })
     return results
 
-# ---------------------------------------------------------------
 # Step 2: ChemBERTa embedding
-# ---------------------------------------------------------------
 def load_model(model_name: str = MODEL_NAME):
     """Load tokenizer and model once. Returns (tokenizer, model, vector_dim)."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -843,9 +834,7 @@ def embed_smiles(
 
     return np.vstack(all_embeddings)
 
-# ---------------------------------------------------------------
 # Step 3: Qdrant indexing
-# ---------------------------------------------------------------
 def index_molecules(client: QdrantClient, molecules: list[dict], embeddings: np.ndarray, vector_dim: int):
     """Create collection and upsert molecule vectors with payloads."""
     # Delete collection if it already exists, then create fresh
@@ -868,9 +857,7 @@ def index_molecules(client: QdrantClient, molecules: list[dict], embeddings: np.
     client.upsert(collection_name=COLLECTION_NAME, points=points)
     print(f"  Indexed {len(points)} molecules.")
 
-# ---------------------------------------------------------------
 # Step 4: Search
-# ---------------------------------------------------------------
 def search(
     client: QdrantClient,
     query_smiles: str,
@@ -907,9 +894,7 @@ def search(
     )
     return results.points
 
-# ---------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------
 def main():
     # Sample drug molecules
     raw_smiles = [

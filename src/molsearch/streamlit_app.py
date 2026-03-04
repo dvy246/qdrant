@@ -14,7 +14,7 @@ import streamlit as st
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Draw
 
-from molsearch.config import SAMPLE_SMILES
+from molsearch.config import SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
 from molsearch.embedder import MoleculeEmbedder
 from molsearch.molecule_processor import process_smiles_batch
 from molsearch.qdrant_indexer import (
@@ -25,7 +25,6 @@ from molsearch.qdrant_indexer import (
     search_similar_molecules,
     upsert_molecules,
 )
-
 
 st.set_page_config(page_title="Molecule Similarity Search", layout="wide")
 st.title("Molecule Similarity Search")
@@ -42,7 +41,9 @@ def load_resources():
     create_payload_indexes(client)
 
     if not collection_exists_and_populated(client):
-        molecules = process_smiles_batch(SAMPLE_SMILES)
+        molecules = process_smiles_batch(
+            SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
+        )
         smiles_list = [m["smiles"] for m in molecules]
         embeddings = embedder.embed(smiles_list)
         upsert_molecules(client, molecules, embeddings)

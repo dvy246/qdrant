@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
-from molsearch.config import MAX_SMILES_LENGTH, SAMPLE_SMILES
+from molsearch.config import MAX_SMILES_LENGTH, SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
 from molsearch.embedder import MoleculeEmbedder
 from molsearch.molecule_processor import process_smiles_batch
 from molsearch.qdrant_indexer import (
@@ -61,7 +61,9 @@ async def lifespan(app: FastAPI):
 
         if not collection_exists_and_populated(_client):
             if _embedder is not None:
-                molecules = process_smiles_batch(SAMPLE_SMILES)
+                molecules = process_smiles_batch(
+                    SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
+                )
                 smiles_list = [m["smiles"] for m in molecules]
                 embeddings = _embedder.embed(smiles_list)
                 upsert_molecules(_client, molecules, embeddings)

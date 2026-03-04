@@ -91,3 +91,16 @@ SAMPLE_SMILES: list[str] = [
     "OC(=O)c1cc(O)c(O)c(O)c1",  # Gallic acid
     "c1ccc2c(c1)ccc1ccccc12",  # Naphthalene
 ]
+
+SAMPLE_TOXICITY_SCORES: list[float] = [
+    0.18,  # Aspirin
+    0.15,  # Ibuprofen
+    0.48,  # Acetaminophen (liver toxicity at high doses)
+    0.37,  # Diclofenac
+    0.22,  # Naproxen
+    0.31,  # Salicylic acid
+    0.14,  # Benzoic acid
+    0.72,  # Testosterone
+    0.08,  # Gallic acid
+    0.61,  # Naphthalene
+]

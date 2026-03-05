@@ -73,14 +73,14 @@ The process utilizes five sequential stages. Raw SMILES strings are ingested, an
 
 Vector embeddings serve distinct use cases compared to traditional fingerprints. For explicit scaffold-level similarity with well-understood Structure-Activity Relationships (SAR), ECFP4 combined with Tanimoto remains highly effective. However, embeddings offer superior utility when exploring unfamiliar chemical space, when fine-tuned on target-specific activity data, or when library scale necessitates approximate nearest neighbor (ANN) indexing to bypass O(N) constraints. This reference architecture defaults to ChemBERTa embeddings; however, Mol2Vec or Graph Neural Network (GNN) pipelines are viable extensions for domains necessitating graph-native encoders.
 
-### Database Selection
+### Why I Chose Qdrant
 
-While various vector databases exist (e.g., Pinecone, Milvus, Weaviate), this system uses Qdrant due to specific technical requirements:
+While there are plenty of vector databases out there (like Pinecone, Milvus, or Weaviate), I specifically chose Qdrant for this experiment for a few practical reasons that make my life easier:
 
-- **Memory Efficiency:** Written in Rust, offering low memory overhead per vector.
-- **Native Payload Filtering:** Supports querying by vector similarity and metadata constraints simultaneously (e.g., matching structures with `MW < 500`).
-- **Tunable Indexing:** Exposes HNSW parameters (`m`, `ef_construct`) to balance search recall against latency.
-- **Local Development:** Provides an in-memory Python client, eliminating Docker dependencies for local testing.
+- **Memory Efficiency:** It's written in Rust and has surprisingly low memory overhead per vector, which is great when I'm running these pipelines locally.
+- **Native Payload Filtering:** This is the big one for me. In chemistry, we never just search by vector. We always want to say "find similar molecules, *but* keep the LogP below 5 and molecular weight under 500." Qdrant handles these metadata constraints seamlessly alongside the vector search.
+- **Tunable Indexing:** It exposes HNSW parameters (`m`, `ef_construct`) so I can balance search recall against latency manually.
+- **Local Development:** It provides a flawless in-memory Python client. I can build, test, and debug my entire pipeline without having to spin up Docker containers first.
 
 ### Similarity Metrics
 
@@ -212,9 +212,13 @@ for smi in drug_smiles:
 print(f"\n{len(molecules)} valid molecules out of {len(drug_smiles)} inputs.")
 ```
 
-Beyond validation, canonicalization ensures that variations like `OC(=O)c1ccccc1OC(C)=O` and `CC(=O)Oc1ccccc1C(=O)O` resolve exclusively to identical canonical SMILES (e.g., aspirin), preventing duplicates in the vector index. The concurrent descriptor calculation computes standard drug-likeness properties (MW, LogP, TPSA, etc.) assigned as Qdrant payload fields, enabling strict criteria filtering during queries (e.g., "retrieve similar molecules with LogP < 5"). Malformed SMILES strings are safely bypassed to prevent pipeline failure.
+Let's break down what this code is actually doing. First, we strip whitespace and do basic empty checks. Then, `Chem.MolFromSmiles(normalized)` tries to parse the string into an RDKit molecule object. If it fails, or if it doesn't have any atoms or bonds, we immediately drop it.
 
-For batch processing workflows (implemented by the API and UI in Sections 8 and 9), validation is encapsulated in an iteration loop. The following functions are co-located in `molecule_processor.py`:
+The most important part is the canonicalization (`Chem.MolToSmiles(mol)`). This ensures that different ways of writing the same SMILES string all resolve to the exact same canonical string (e.g., Aspirin is always represented the exact same way), preventing duplicates in our database. I also added a "round-trip integrity check" where we parse the canonical SMILES *back* into a molecule just to be absolutely certain it's valid.
+
+While we're processing the molecule, we also compute basic descriptors (like molecular weight, LogP, and TPSA) and grab any toxicity scores. We store all of this in a dictionary payload that we will later hand directly to Qdrant so we can filter our queries against these exact values.
+
+For batch processing workflows (implemented by the API and UI in Sections 8 and 9), this validation is encapsulated in an iteration loop:
 
 ```python
 def process_smiles_batch(
@@ -226,12 +230,21 @@ def process_smiles_batch(
     Invalid SMILES are silently skipped.
     """
     if toxicity_scores is not None and len(toxicity_scores) != len(smiles_list):
-        raise ValueError("toxicity_scores length must match smiles_list length")
+        raise ValueError(
+            "toxicity_scores length must match smiles_list length: "
+            f"{len(toxicity_scores)} != {len(smiles_list)}"
+        )
 
     results = []
     for i, smi in enumerate(smiles_list):
         toxicity_score = toxicity_scores[i] if toxicity_scores is not None else None
-        result = validate_and_canonicalize(smi, toxicity_score=toxicity_score)
+        
+        try:
+            result = validate_and_canonicalize(smi, toxicity_score=toxicity_score)
+        except ValueError:
+            print(f"  Invalid toxicity score for SMILES: {smi}")
+            continue
+
         if result is not None:
             results.append(result)
         else:
@@ -448,28 +461,51 @@ def search_similar_molecules(
     query_smiles: str,
     embedder: MoleculeEmbedder,
     client: QdrantClient,
-    collection_name: str = "molecules",
+    collection_name: str = COLLECTION_NAME,
     top_k: int = 5,
     mw_max: float | None = None,
     logp_max: float | None = None,
     toxicity_max: float | None = None,
 ) -> list[dict]:
     """
-    Search for molecules similar to the query SMILES.
-    Optionally filter by molecular weight, LogP, and toxicity.
-    Returns results ranked by fused score (cosine + Tanimoto).
+    Search for molecules similar to the query SMILES string.
+
+    The query is embedded (caller is responsible for validation) and
+    then used to search the Qdrant collection. Optional filters on
+    molecular properties can be applied.
+
+    Args:
+        query_smiles: A validated SMILES string for the query molecule.
+        embedder: A MoleculeEmbedder instance.
+        client: A QdrantClient instance.
+        collection_name: Name of the Qdrant collection.
+        top_k: Number of results to return.
+        mw_max: Maximum molecular weight filter (optional).
+        logp_max: Maximum LogP filter (optional).
+        toxicity_max: Maximum toxicity score filter (optional).
+
+    Returns:
+        List of dictionaries, each containing:
+            - smiles: SMILES of the hit molecule
+            - score: cosine similarity score
+            - tanimoto_score: ECFP structural similarity score
+            - fused_score: Combined similarity score
+            - molecular_weight: MW of the hit
+            - logp: LogP of the hit
+            - toxicity_score: Optional toxicity score if available
+
+    Raises:
+        RuntimeError: If Qdrant query fails.
     """
-    # Validate input
-    mol = Chem.MolFromSmiles(query_smiles)
-    if mol is None:
-        raise ValueError(f"Invalid SMILES: {query_smiles}")
-    
-    canonical = Chem.MolToSmiles(mol)
-    
-    # Embed the query
-    query_vector = embedder.embed([canonical])[0].tolist()
-    
-    # Build optional filters
+    try:
+        embeddings = embedder.embed([query_smiles])
+        if np.any(np.isnan(embeddings)):
+            raise ValueError("query vector generation failed (nan)")
+        query_vector = embeddings[0].tolist()
+    except Exception as exc:
+        logger.error("Failed to embed query SMILES: %s", exc)
+        raise RuntimeError(f"Query embedding failed: {exc}") from exc
+
     conditions = []
     if mw_max is not None:
         conditions.append(
@@ -492,53 +528,68 @@ def search_similar_molecules(
                 range=Range(lte=toxicity_max),
             )
         )
-    
-    query_filter = Filter(must=conditions) if conditions else None
-    
-    # Fetch more than top_k to allow re-ranking by fused score
+
+    query_filter = Filter(must=conditions) if conditions else None  # type: ignore[arg-type]
+
     fetch_limit = top_k * 5
-    
-    # Search
-    results = client.query_points(
-        collection_name=collection_name,
-        query=query_vector,
-        query_filter=query_filter,
-        limit=fetch_limit,
-        with_payload=True,
-    )
-    
-    # Compute ECFP fingerprint for Tanimoto scoring
-    generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
-    query_fp = generator.GetFingerprint(mol)
-    
-    # Format results with hybrid scoring
+
+    results = None
+    for attempt in range(3):
+        try:
+            results = client.query_points(
+                collection_name=collection_name,
+                query=query_vector,
+                query_filter=query_filter,
+                limit=fetch_limit,
+                with_payload=True,
+                timeout=30,
+            )
+            break
+        except Exception as exc:
+            if attempt == 2:
+                logger.error("Qdrant query failed after 3 attempts: %s", exc)
+                return []
+
+    if results is None:
+        return []
+
+    query_mol = Chem.MolFromSmiles(query_smiles)
+    if query_mol is not None:
+        generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+        query_fp = generator.GetFingerprint(query_mol)
+    else:
+        query_fp = None
+
     hits = []
     for point in results.points:
         payload = point.payload or {}
-        hit_smiles = payload.get("smiles", "")
-        
-        # Compute Tanimoto similarity using ECFP fingerprints
-        tanimoto = 0.0
-        hit_mol = Chem.MolFromSmiles(hit_smiles)
-        if hit_mol is not None:
-            hit_fp = generator.GetFingerprint(hit_mol)
-            tanimoto = DataStructs.TanimotoSimilarity(query_fp, hit_fp)
-        
-        # Fuse cosine similarity with Tanimoto (equal weighting)
-        fused_score = 0.5 * point.score + 0.5 * tanimoto
-        
         toxicity = payload.get("toxicity_score")
-        hits.append({
-            "smiles": hit_smiles,
-            "score": round(point.score, 4),
-            "tanimoto_score": round(tanimoto, 4),
-            "fused_score": round(fused_score, 4),
-            "molecular_weight": payload.get("molecular_weight", 0.0),
-            "logp": payload.get("logp", 0.0),
-            "toxicity_score": toxicity if isinstance(toxicity, (int, float)) else None,
-        })
-    
-    # Re-rank by fused score
+        hit_smiles = payload.get("smiles", "")
+
+        tanimoto = 0.0
+        if query_fp is not None and hit_smiles:
+            hit_mol = Chem.MolFromSmiles(hit_smiles)
+            if hit_mol is not None:
+                hit_fp = generator.GetFingerprint(hit_mol)
+                tanimoto = DataStructs.TanimotoSimilarity(query_fp, hit_fp)
+
+        # TODO: make fusion weights configurable
+        fused_score = 0.5 * point.score + 0.5 * tanimoto
+
+        hits.append(
+            {
+                "smiles": hit_smiles,
+                "score": round(point.score, 4),
+                "tanimoto_score": round(tanimoto, 4),
+                "fused_score": round(fused_score, 4),
+                "molecular_weight": payload.get("molecular_weight", 0.0),
+                "logp": payload.get("logp", 0.0),
+                "toxicity_score": (
+                    toxicity if isinstance(toxicity, (int, float)) else None
+                ),
+            }
+        )
+
     hits.sort(key=lambda x: x["fused_score"], reverse=True)
     return hits[:top_k]
 
@@ -554,9 +605,13 @@ for i, hit in enumerate(results, 1):
     print(f"{i:<6}{hit['smiles']:<45}{hit['fused_score']:<10}{hit['score']:<10}{hit['tanimoto_score']:<10}{hit['molecular_weight']:<10}{hit['logp']}")
 ```
 
-**Filtered search** is one of Qdrant's strongest features. In drug discovery, queries rarely request "the most similar molecule regardless of properties." More commonly, the requirement is "find similar molecules with molecular weight under 500 and LogP under 5" (Lipinski's Rule of Five). Payload filters execute this natively without inefficient post-processing.
+There's a lot happening in a small amount of code here, so let's unpack it.
 
-The system utilizes a hybrid scoring mechanism during retrieval. Latent embedding similarity (cosine distance) is combined with ECFP fingerprint structural similarity (Tanimoto coefficient) into a single `fused_score`. This ensures both learned representations and explicit substructures are factored into the final ranking.
+First, we embed our query SMILES using the exact same tokenizer and model we used for indexing. Then, we construct Qdrant `FieldCondition` filters for any molecular weight, LogP, or toxicity caps we've set. As I mentioned earlier, this is why I love Qdrant—it applies these filters natively during the search, rather than just returning nearest neighbors and forcing us to manually throw out the ones that violate our constraints (like Lipinski's Rule of Five).
+
+Notice that we fetch `top_k * 5` results from Qdrant instead of just `top_k`. We do this because we're using a **hybrid scoring mechanism**. The vector database gives us the cosine similarity of the ChemBERTa embeddings. But because embeddings can sometimes miss explicit structural features (like counting the difference in methyl groups), we also generate an ECFP Morgan fingerprint on the fly for each hit and calculate the classic Tanimoto similarity. 
+
+We then fuse the cosine score from Qdrant and the computed Tanimoto score (`0.5 * point.score + 0.5 * tanimoto`), re-rank our over-fetched hits by this new fused score, and return the true `top_k`. This gives us the best of both worlds: the semantic understanding of embeddings mixed with the rigid structural accuracy of fingerprints.
 
 ---
 
@@ -656,29 +711,57 @@ async def search(request: SearchRequest):
     if _embedder is None or _client is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    mol = Chem.MolFromSmiles(request.smiles)
-    if mol is None:
-        raise HTTPException(status_code=400, detail=f"Invalid SMILES: {request.smiles}")
-    
+    query_smiles = request.smiles.strip()
+    if not query_smiles:
+        raise HTTPException(status_code=400, detail="empty smiles")
+
+    numeric_filters = {
+        "mw_max": request.mw_max,
+        "logp_max": request.logp_max,
+        "toxicity_max": request.toxicity_max,
+    }
+    for key, value in numeric_filters.items():
+        if value is not None and not math.isfinite(value):
+            raise HTTPException(
+                status_code=422, detail=f"{key} must be a finite number"
+            )
+
+    mol = Chem.MolFromSmiles(query_smiles)
+    if mol is None or mol.GetNumAtoms() == 0:
+        raise HTTPException(status_code=400, detail="invalid smiles")
+
     canonical = Chem.MolToSmiles(mol)
-    
-    # Run in executor to avoid blocking the async event loop during
-    # CPU-bound embedding inference
+
+    if len(canonical) > 400:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "too_long",
+                "message": "smiles exceeds length limit",
+                "length": len(canonical),
+            },
+        )
+
+    # run in thread pool to avoid blocking async loop
     loop = asyncio.get_running_loop()
-    hits = await loop.run_in_executor(
-        None,
-        partial(
-            search_similar_molecules,
-            query_smiles=canonical,
-            embedder=_embedder,
-            client=_client,
-            top_k=request.top_k,
-            mw_max=request.mw_max,
-            logp_max=request.logp_max,
-            toxicity_max=request.toxicity_max,
-        ),
-    )
-    
+    try:
+        hits = await loop.run_in_executor(
+            None,
+            partial(
+                search_similar_molecules,
+                query_smiles=canonical,
+                embedder=_embedder,
+                client=_client,
+                top_k=request.top_k,
+                mw_max=request.mw_max,
+                logp_max=request.logp_max,
+                toxicity_max=request.toxicity_max,
+            ),
+        )
+    except RuntimeError as exc:
+        logger.error("Search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Search failed: {exc}") from exc
+
     return SearchResponse(
         query_smiles=request.smiles,
         canonical_smiles=canonical,
@@ -688,11 +771,10 @@ async def search(request: SearchRequest):
 
 @app.get("/health")
 def health(response: Response):
-    """Liveness probe. Returns 503 if embedder or Qdrant is unavailable."""
-    if _embedder is None or _client is None:
-        response.status_code = 503
-        return {"status": "degraded"}
-    return {"status": "ok"}
+    """Liveness probe."""
+    health_status = check_system_health(_embedder, _client)
+    response.status_code = 200 if health_status["status"] == "ok" else 503
+    return health_status
 ```
 
 Run the server:
@@ -776,54 +858,83 @@ with col1:
 with col2:
     mw_filter = st.number_input("Max molecular weight (0 = no filter)", value=0.0, step=50.0)
 
-if st.button("Search", type="primary"):
+search_clicked = st.sidebar.button("Search", type="primary", use_container_width=True)
+
+
+if search_clicked:
+    query_smiles = query_smiles.strip()
     mol = Chem.MolFromSmiles(query_smiles)
-    if mol is None:
+
+    if mol is None or mol.GetNumAtoms() == 0:
         st.error(f"Invalid SMILES: {query_smiles}")
     else:
-        # Show query molecule
-        st.subheader("Query Molecule")
-        img = Draw.MolToImage(mol, size=(300, 300))
-        st.image(img, caption=Chem.MolToSmiles(mol))
-        
+        canonical_query = Chem.MolToSmiles(mol)
+
+        col_query, col_info = st.columns([1, 2])
+        with col_query:
+            st.subheader("Query Molecule")
+            img = Draw.MolToImage(mol, size=(300, 300))
+            st.image(img, caption=canonical_query)
+        with col_info:
+            st.subheader("Query Info")
+            # RDKit descriptors are loaded dynamically and aren't visible to mypy
+            st.metric("Molecular Weight", f"{Descriptors.MolWt(mol):.2f}")  # type: ignore[attr-defined]
+            st.metric("LogP", f"{Descriptors.MolLogP(mol):.2f}")  # type: ignore[attr-defined]
+
+        st.divider()
+
         mw_max = mw_filter if mw_filter > 0 else None
+        logp_max = logp_filter if logp_filter > 0 else None
         
+        # In a real app, you'd have a toxicity slider. Simulating that here:
+        toxicity_filter = 0.0 # Placeholder matching repo app sidebar
+        toxicity_max = toxicity_filter if toxicity_filter > 0 else None
+
         results = search_similar_molecules(
-            query_smiles=query_smiles,
+            query_smiles=canonical_query,
             embedder=embedder,
             client=client,
             top_k=top_k,
             mw_max=mw_max,
+            logp_max=logp_max,
+            toxicity_max=toxicity_max,
         )
-        
+
         st.subheader(f"Top {len(results)} Similar Molecules")
-        
-        for i, hit in enumerate(results):
-            with st.container():
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    hit_mol = Chem.MolFromSmiles(hit["smiles"])
-                    if hit_mol:
-                        hit_img = Draw.MolToImage(hit_mol, size=(250, 250))
-                        st.image(hit_img)
-                with c2:
-                    st.markdown(
-                        f"**Rank {i + 1}** | "
-                        f"Fused: **{hit['fused_score']}** "
-                        f"(Tanimoto: {hit['tanimoto_score']}, Latent: {hit['score']})"
-                    )
-                    st.code(hit["smiles"], language=None)
-                    toxicity_text = (
-                        f"{hit['toxicity_score']:.3f}"
-                        if isinstance(hit.get('toxicity_score'), (int, float))
-                        else "n/a"
-                    )
-                    st.write(
-                        f"MW: {hit['molecular_weight']} | "
-                        f"LogP: {hit['logp']} | "
-                        f"Toxicity: {toxicity_text}"
-                    )
-                st.divider()
+
+        if not results:
+            st.info("No results found. Try relaxing the filters.")
+        else:
+            for i, hit in enumerate(results):
+                with st.container():
+                    c1, c2 = st.columns([1, 2])
+                    with c1:
+                        hit_mol = Chem.MolFromSmiles(hit["smiles"])
+                        if hit_mol:
+                            hit_img = Draw.MolToImage(hit_mol, size=(250, 250))
+                            st.image(hit_img)
+                    with c2:
+                        st.markdown(
+                            f"**Rank {i + 1}** | "
+                            f"Fused: **{hit['fused_score']}** "
+                            f"(Tanimoto: {hit['tanimoto_score']}, Latent: {hit['score']})"
+                        )
+                        st.code(hit["smiles"], language=None)
+                        toxicity_text = (
+                            f"{hit['toxicity_score']:.3f}"
+                            if isinstance(hit.get("toxicity_score"), (int, float))
+                            else "n/a"
+                        )
+                        st.write(
+                            f"MW: {hit['molecular_weight']} | "
+                            f"LogP: {hit['logp']} | "
+                            f"Toxicity: {toxicity_text}"
+                        )
+                    st.divider()
+else:
+    st.info(
+        "Enter a SMILES string in the sidebar and click Search to find similar molecules."
+    )
 ```
 
 Run with:
@@ -993,14 +1104,25 @@ def search(
 ):
     """Search for similar molecules with hybrid scoring (cosine + Tanimoto)."""
     from qdrant_client.models import Filter, FieldCondition, Range
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     mol = Chem.MolFromSmiles(query_smiles)
     if mol is None:
         raise ValueError(f"Invalid query SMILES: {query_smiles}")
     
     canonical = Chem.MolToSmiles(mol)
-    query_vec = embed_smiles([canonical], tokenizer, model, vector_dim)[0].tolist()
     
+    try:
+        embeddings = embed_smiles([canonical], tokenizer, model, vector_dim)
+        if np.any(np.isnan(embeddings)):
+            raise ValueError("query vector generation failed (nan)")
+        query_vec = embeddings[0].tolist()
+    except Exception as exc:
+        logger.error("Failed to embed query SMILES: %s", exc)
+        raise RuntimeError(f"Query embedding failed: {exc}") from exc
+
     conditions = []
     if mw_max is not None:
         conditions.append(FieldCondition(key="molecular_weight", range=Range(lte=mw_max)))
@@ -1012,41 +1134,61 @@ def search(
 
     fetch_limit = top_k * 5
 
-    results = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vec,
-        query_filter=query_filter,
-        limit=fetch_limit,
-        with_payload=True,
-    )
+    results = None
+    for attempt in range(3):
+        try:
+            results = client.query_points(
+                collection_name=COLLECTION_NAME,
+                query=query_vec,
+                query_filter=query_filter,
+                limit=fetch_limit,
+                with_payload=True,
+                timeout=30,
+            )
+            break
+        except Exception as exc:
+            if attempt == 2:
+                logger.error("Qdrant query failed after 3 attempts: %s", exc)
+                return []
 
-    # Compute ECFP fingerprint for Tanimoto scoring
-    generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
-    query_fp = generator.GetFingerprint(mol)
+    if results is None:
+        return []
+
+    query_mol = Chem.MolFromSmiles(query_smiles)
+    if query_mol is not None:
+        generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+        query_fp = generator.GetFingerprint(query_mol)
+    else:
+        query_fp = None
 
     hits = []
     for point in results.points:
         payload = point.payload or {}
+        toxicity = payload.get("toxicity_score")
         hit_smiles = payload.get("smiles", "")
 
         tanimoto = 0.0
-        hit_mol = Chem.MolFromSmiles(hit_smiles)
-        if hit_mol is not None:
-            hit_fp = generator.GetFingerprint(hit_mol)
-            tanimoto = DataStructs.TanimotoSimilarity(query_fp, hit_fp)
+        if query_fp is not None and hit_smiles:
+            hit_mol = Chem.MolFromSmiles(hit_smiles)
+            if hit_mol is not None:
+                hit_fp = generator.GetFingerprint(hit_mol)
+                tanimoto = DataStructs.TanimotoSimilarity(query_fp, hit_fp)
 
         fused_score = 0.5 * point.score + 0.5 * tanimoto
 
-        toxicity = payload.get("toxicity_score")
-        hits.append({
-            "smiles": hit_smiles,
-            "score": round(point.score, 4),
-            "tanimoto_score": round(tanimoto, 4),
-            "fused_score": round(fused_score, 4),
-            "molecular_weight": payload.get("molecular_weight", 0.0),
-            "logp": payload.get("logp", 0.0),
-            "toxicity_score": toxicity if isinstance(toxicity, (int, float)) else None,
-        })
+        hits.append(
+            {
+                "smiles": hit_smiles,
+                "score": round(point.score, 4),
+                "tanimoto_score": round(tanimoto, 4),
+                "fused_score": round(fused_score, 4),
+                "molecular_weight": payload.get("molecular_weight", 0.0),
+                "logp": payload.get("logp", 0.0),
+                "toxicity_score": (
+                    toxicity if isinstance(toxicity, (int, float)) else None
+                ),
+            }
+        )
 
     hits.sort(key=lambda x: x["fused_score"], reverse=True)
     return hits[:top_k]

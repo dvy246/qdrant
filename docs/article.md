@@ -256,9 +256,9 @@ def process_smiles_batch(
 
 ## 5. Step 2: Generate Molecular Embeddings with ChemBERTa
 
-ChemBERTa fundamentally operates as a RoBERTa model pre-trained natively on SMILES strings from the ZINC database. The selected artifact `seyonec/ChemBERTa-zinc-base-v1`, available via HuggingFace, outputs 768-dimensional discrete token hidden states.
+ChemBERTa fundamentally operates as a RoBERTa model pre-trained natively on SMILES strings from the ZINC database. For my embeddings, I chose the `seyonec/ChemBERTa-zinc-base-v1` checkpoint from HuggingFace because it already "understands" SMILES syntax right out of the box.
 
-Lacking a dedicated pooling "embedding" head, the architecture extracts molecule-level embeddings by mean-pooling the last hidden state across all valid tokens (explicitly excluding padding tokens). This approach parallels standard methodologies for extracting sentence-level embeddings from BERT-oriented NLP models.
+When the model processes a SMILES string, it spits out a variable-length sequence of 768-dimensional token vectors. However, Qdrant requires a single, fixed-length vector to represent the whole molecule. To solve this, my `MoleculeEmbedder` applies mean pooling (averaging all the token vectors together, excluding padding tokens). Finally, I apply L2 normalization to map these embeddings onto a unit hypersphere—this formats them perfectly so Qdrant can use fast cosine similarity to compare them.
 
 ```python
 from __future__ import annotations
@@ -425,13 +425,14 @@ print(f"Points count: {collection_info.points_count}")
 print(f"Vector size: {collection_info.config.params.vectors.size}")
 ```
 
-### Indexing Implementation Details
+### How I Handle Indexing
 
-- **Idempotent Upserts:** Using `upsert` ensures that re-indexing a molecule overwrites its existing entry rather than creating duplicates.
-- **Deterministic IDs:** Point IDs rely on `uuid.uuid5` generated from canonical SMILES, preventing collisions during incremental updates.
-- **Collection Management:** In development, `create_collection` drops existing data. In production, this requires explicit configuration guards.
-- **Batch Processing:** The API upserts in chunks of `UPSERT_BATCH_SIZE=1000` to constrain memory usage for large libraries.
-- **Payload Indexing:** For datasets exceeding 100k points, keyword and float payload indexes significantly improve filter performance.
+When building this pipeline, I ran into a few standard headaches that I had to solve in the indexing logic:
+
+- **Handling Duplicates:** I hate accidentally duplicating records when I re-run an indexing script. By using deterministic IDs (generating a `uuid.uuid5` directly from the canonical SMILES), I guarantee that if I index the exact same molecule twice, Qdrant just overwrites the old entry securely.
+- **Collection Overwrites:** For local test runs, my `create_collection` function just drops the existing index and starts fresh. Obviously, I wrap this in strict guards when moving to production.
+- **Memory Management:** Attempting to embed and upload massive sets at once will quickly fry local memory. In the real API flow, I always chunk upserts into manageable batches.
+- **Payload Indexing:** Because I heavily rely on metadata filtering (like capping toxicity scores), I explicitly tell Qdrant to create internal indexes for those specific float values. If you skip this manual indexing step, your filtered searches will grind to a halt on large datasets.
 
 ```python
 from qdrant_client.models import PayloadSchemaType
@@ -609,7 +610,7 @@ There's a lot happening in a small amount of code here, so let's unpack it.
 
 First, we embed our query SMILES using the exact same tokenizer and model we used for indexing. Then, we construct Qdrant `FieldCondition` filters for any molecular weight, LogP, or toxicity caps we've set. As I mentioned earlier, this is why I love Qdrant—it applies these filters natively during the search, rather than just returning nearest neighbors and forcing us to manually throw out the ones that violate our constraints (like Lipinski's Rule of Five).
 
-Notice that we fetch `top_k * 5` results from Qdrant instead of just `top_k`. We do this because we're using a **hybrid scoring mechanism**. The vector database gives us the cosine similarity of the ChemBERTa embeddings. But because embeddings can sometimes miss explicit structural features (like counting the difference in methyl groups), we also generate an ECFP Morgan fingerprint on the fly for each hit and calculate the classic Tanimoto similarity. 
+Notice that we fetch `top_k * 5` results from Qdrant instead of just `top_k`. We do this because we're using a **hybrid scoring mechanism**. The vector database gives us the cosine similarity of the ChemBERTa embeddings. But because embeddings can sometimes miss explicit structural features (like counting the difference in methyl groups), we also generate an ECFP Morgan fingerprint on the fly for each hit and calculate the classic Tanimoto similarity.
 
 We then fuse the cosine score from Qdrant and the computed Tanimoto score (`0.5 * point.score + 0.5 * tanimoto`), re-rank our over-fetched hits by this new fused score, and return the true `top_k`. This gives us the best of both worlds: the semantic understanding of embeddings mixed with the rigid structural accuracy of fingerprints.
 
@@ -617,7 +618,7 @@ We then fuse the cosine score from Qdrant and the computed Tanimoto score (`0.5 
 
 ## 8. Step 5: FastAPI Search Service
 
-Wrapping the search in an API makes it accessible to other services, dashboards, and automated pipelines.
+A local Python script is great for testing, but eventually, I need to plug this engine into my team's actual drug discovery platforms. I wrap the whole search pipeline in a FastAPI service so frontend applications can query it instantly without having to load the heavy transformer models themselves.
 
 ```python
 # api_server.py
@@ -776,6 +777,10 @@ def health(response: Response):
     response.status_code = 200 if health_status["status"] == "ok" else 503
     return health_status
 ```
+
+Here's the problem this API solves: embedding a SMILES string is a mathematically heavy, CPU-bound process. If I just ran it natively inside my FastAPI endpoint, it would block the entire async event loop. If multiple chemists tried to query the API at the same time, the server would lock up. 
+
+To prevent that, I use `asyncio.get_running_loop().run_in_executor()` to hand off the actual transformer inference and Qdrant search to a separate worker thread. I also threw in strict validation—like checking for empty strings, validating that numeric filters are actually finite numbers, and ensuring the SMILES isn't longer than 400 characters (because ChemBERTa's token limit will truncate massive polymers anyway).
 
 Run the server:
 
@@ -947,7 +952,7 @@ streamlit run streamlit_app.py
 
 ## 10. End-to-End Pipeline: Putting It All Together
 
-The following standalone implementation integrates the validation, embedding, indexing, and querying stages into a unified pipeline.
+I've broken down the architecture component-by-component so far, but I know how annoying it is to copy-paste fragments. Below, I've stitched everything together—validation, ChemBERTa embedding, Qdrant indexing, and the hybrid retrieval logic—into a single, runnable script that you can execute right now.
 
 ```python
 """

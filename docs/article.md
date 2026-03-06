@@ -75,12 +75,17 @@ Vector embeddings serve distinct use cases compared to traditional fingerprints.
 
 ### Why I Chose Qdrant
 
-While there are plenty of vector databases out there (like Pinecone, Milvus, or Weaviate), I specifically chose Qdrant for this experiment for a few practical reasons that make my life easier:
+I wanted to test how well different vector databases handle molecular embeddings with the kind of metadata-heavy filtering that chemistry workflows demand. During experimentation I tried Pinecone, Milvus, and Weaviate alongside Qdrant, and each had trade-offs.
 
-- **Memory Efficiency:** It's written in Rust and has surprisingly low memory overhead per vector, which is great when I'm running these pipelines locally.
-- **Native Payload Filtering:** This is the big one for me. In chemistry, we never just search by vector. We always want to say "find similar molecules, *but* keep the LogP below 5 and molecular weight under 500." Qdrant handles these metadata constraints seamlessly alongside the vector search.
-- **Tunable Indexing:** It exposes HNSW parameters (`m`, `ef_construct`) so I can balance search recall against latency manually.
-- **Local Development:** It provides a flawless in-memory Python client. I can build, test, and debug my entire pipeline without having to spin up Docker containers first.
+Pinecone was straightforward to set up in the cloud, but I kept running into friction when I needed to combine vector similarity with numeric payload filters (like capping molecular weight or toxicity). Milvus had strong performance on raw vector search, but the local setup felt heavy for an experiment—spinning up etcd plus MinIO just to prototype felt like overkill. Weaviate had a nice schema system, but the filtering semantics didn't feel as clean when I was layering multiple numeric range conditions on top of a vector query.
+
+After trying different setups, this led me to choose Qdrant. Here's what made the difference for this specific use case:
+
+- **Native Payload Filtering:** This is the big one for me. In chemistry, we never just search by vector. We always want to say "find similar molecules, *but* keep the LogP below 5 and molecular weight under 500." Qdrant applies these metadata constraints natively during the HNSW traversal, not as a post-filter step. That distinction matters at scale—post-filtering can silently eat your top-k results if the filter is restrictive.
+- **Clean Local Development:** Qdrant's Python client supports a flawless in-memory mode (`:memory:`). I could build, test, and debug my entire pipeline—including the full upsert and search flow—without spinning up Docker containers or external services. When I was ready to move to persistent storage, switching to a containerized Qdrant instance was a one-line config change.
+- **Reliable Indexing Behavior:** The collection management felt predictable. Non-destructive collection creation, deterministic UUID-based upserts, and explicit payload index creation all worked without surprises. I never had to fight the database to get the behavior I expected.
+- **Low Memory Overhead:** It's written in Rust and has surprisingly lean memory consumption per vector. When I'm running these pipelines on my laptop with 768-dimensional embeddings, that overhead adds up.
+- **Tunable HNSW Parameters:** It exposes `m` and `ef_construct` directly, so I can trade off search recall against latency. For drug discovery, recall matters more—a missed analog is a missed drug candidate—so being able to push `ef` higher at query time is useful.
 
 ### Similarity Metrics
 
@@ -263,63 +268,114 @@ When the model processes a SMILES string, it spits out a variable-length sequenc
 ```python
 from __future__ import annotations
 
-import torch
-from transformers import AutoTokenizer, AutoModel
+import logging
+
 import numpy as np
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+logger = logging.getLogger(__name__)
+
+MODEL_NAME = "seyonec/ChemBERTa-zinc-base-v1"
+VECTOR_DIM = 768
+BATCH_SIZE = 32
+
+
+def _get_device() -> torch.device:
+    """Pick best available torch device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
 
 class MoleculeEmbedder:
     """
-    Embeds SMILES strings into dense vectors using ChemBERTa.
-    Uses mean pooling over the last hidden state.
+    Generates L2-normalized ChemBERTa embeddings from SMILES.
     """
-    
-    def __init__(self, model_name: str = "seyonec/ChemBERTa-zinc-base-v1"):
+
+    def __init__(self, model_name: str = MODEL_NAME):
+        self.device = _get_device()
+        logger.info("Using device: %s", self.device)
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
+        self.model.to(self.device)
         self.model.eval()
-    
-    def _mean_pool(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Mean pool hidden states, masking out padding tokens.
-        """
-        mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        self.vector_dim = self.model.config.hidden_size
+
+        if self.vector_dim != VECTOR_DIM:
+            raise ValueError(
+                f"Model hidden size ({self.vector_dim}) does not match "
+                f"VECTOR_DIM ({VECTOR_DIM})"
+            )
+
+        logger.info("loaded %s on %s", model_name, self.device)
+
+    def _mean_pool(
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Average hidden states across non-padding tokens."""
+        mask_expanded = (
+            attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        )
         sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
         sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
         return sum_hidden / sum_mask
-    
-    def embed(self, smiles_list: list[str], batch_size: int = 32) -> np.ndarray:
-        """
-        Embed a list of SMILES strings. Returns a numpy array of shape (n, 768).
-        """
-        if not smiles_list:
-            return np.empty((0, 768), dtype=np.float32)
 
-        all_embeddings = []
-        
-        for i in range(0, len(smiles_list), batch_size):
-            batch = smiles_list[i:i + batch_size]
-            
+    def embed(
+        self,
+        smiles_list: list[str],
+        batch_size: int = BATCH_SIZE,
+    ) -> np.ndarray:
+        """
+        Embed a list of SMILES strings into dense vectors.
+        Returns numpy array of shape (n, vector_dim) with L2-normalized embeddings.
+        """
+        n = len(smiles_list)
+        if n == 0:
+            return np.empty((0, self.vector_dim), dtype=np.float32)
+
+        result = np.empty((n, self.vector_dim), dtype=np.float32)
+
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            batch = smiles_list[start:end]
+
+            if any(len(s) > 400 for s in batch):
+                logger.error("batch %d-%d: smiles too long, skipping", start, end)
+                result[start:end] = np.nan
+                continue
+
             encoded = self.tokenizer(
                 batch,
                 padding=True,
-                truncation=True,
-                max_length=512,
+                truncation=False,
                 return_tensors="pt",
             )
-            
+
+            if encoded["input_ids"].shape[1] > 512:
+                logger.error("batch %d-%d: context limit exceeded", start, end)
+                result[start:end] = np.nan
+                continue
+
+            encoded = {k: v.to(self.device) for k, v in encoded.items()}
+
             with torch.no_grad():
                 outputs = self.model(**encoded)
-            
+
             embeddings = self._mean_pool(
                 outputs.last_hidden_state,
                 encoded["attention_mask"],
             )
-            
-            # L2 normalize for cosine similarity
+
+            # L2 normalize so dot product == cosine
             embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-            all_embeddings.append(embeddings.cpu().numpy())
-        
-        return np.vstack(all_embeddings)
+            result[start:end] = embeddings.cpu().numpy()
+
+        return result
+
 
 # Usage
 embedder = MoleculeEmbedder()
@@ -333,6 +389,10 @@ print(f"Vector norm (should be ~1.0): {np.linalg.norm(embeddings[0]):.4f}")
 ```
 
 A few architectural notes. Mean pooling is utilized instead of the `[CLS]` token because ChemBERTa is RoBERTa-based, and RoBERTa's CLS token was not trained with a next-sentence prediction objective. Mean pooling across all non-padding tokens is the standard approach for extracting sequence-level representations from BERT-family models when no dedicated embedding head exists. Whether it outperforms CLS for molecular similarity specifically has not been rigorously benchmarked in published work, but it is consistent with best practices from the NLP sentence-embedding literature (Reimers & Gurevych, 2019).
+
+One deliberate design choice: the embedder sets `truncation=False` and explicitly rejects any batch where the tokenized input exceeds 512 tokens. This is intentional. Silently truncating a SMILES string would produce an embedding that represents only part of the molecule, which is scientifically misleading. Instead, the pipeline flags overly long molecules upfront (any SMILES longer than 400 characters gets rejected before tokenization, and any batch exceeding the 512-token context window is caught after tokenization). Failed batches get filled with `np.nan` so downstream code can detect and handle them.
+
+The output array is pre-allocated with `np.empty` rather than collected into a list and stacked with `np.vstack`. For large datasets, `np.vstack` temporarily doubles memory usage when it copies all the batch arrays into a single contiguous array. Pre-allocation avoids that spike.
 
 Vectors are L2-normalized so that cosine similarity and dot product give identical results. This maintains simplicity and ensures scores are comparable across queries. Batching is performed at 32 molecules per batch to balance memory usage against throughput. On a standard CPU, expect approximately 100 to 300 molecules per second, depending on hardware constraints and SMILES string length.
 
@@ -355,29 +415,44 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
-    VectorParams,
     PointStruct,
+    VectorParams,
 )
 
 COLLECTION_NAME = "molecules"
 VECTOR_DIM = 768  # ChemBERTa output dimension
+UPSERT_BATCH_SIZE = 1000
+
+# Controlled via environment variable MOLSEARCH_PERSISTENT_QDRANT
+USE_PERSISTENT_QDRANT = False
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
 
 
-def get_qdrant_client(host: str = ":memory:") -> QdrantClient:
-    """Return an in-memory client for development or a server client for production."""
-    if host == ":memory:":
-        return QdrantClient(":memory:")
-    return QdrantClient(host=host, port=6333)
+def get_qdrant_client() -> QdrantClient:
+    """Config-driven: in-memory for development, persistent for production."""
+    if USE_PERSISTENT_QDRANT:
+        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=10)
+        client.get_collections()  # verify connection
+        return client
+    return QdrantClient(":memory:")
 
 
-def create_collection(client: QdrantClient, vector_dim: int = VECTOR_DIM) -> None:
-    """Create (or recreate) the molecules collection with cosine similarity."""
+def create_collection(client: QdrantClient) -> None:
+    """Ensure the molecules collection exists (non-destructive)."""
     if client.collection_exists(collection_name=COLLECTION_NAME):
-        client.delete_collection(collection_name=COLLECTION_NAME)
+        info = client.get_collection(collection_name=COLLECTION_NAME)
+        size = getattr(info.config.params.vectors, "size", None)
+        if size is not None and size != VECTOR_DIM:
+            raise ValueError(
+                f"Existing collection has vector size {size}, expected {VECTOR_DIM}"
+            )
+        return  # reuse existing collection
+
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(
-            size=vector_dim,
+            size=VECTOR_DIM,
             distance=Distance.COSINE,
         ),
     )
@@ -393,20 +468,30 @@ def upsert_molecules(
     client: QdrantClient,
     molecules: list[dict],
     embeddings: np.ndarray,
+    batch_size: int = UPSERT_BATCH_SIZE,
 ) -> None:
-    """Upsert molecule vectors and metadata payloads into Qdrant."""
-    points = [
-        PointStruct(
-            id=_smiles_to_uuid(mol["smiles"]),
-            vector=emb.tolist(),
-            payload=mol,
-        )
-        for mol, emb in zip(molecules, embeddings)
-    ]
-    client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=points,
-    )
+    """Upsert molecule vectors and payloads into Qdrant in batches."""
+    n = len(molecules)
+
+    # Skip rows with nan/inf/zero-norm vectors
+    valid_mask = ~np.isnan(embeddings).any(axis=1) & ~np.isinf(embeddings).any(axis=1)
+    valid_mask &= np.linalg.norm(embeddings, axis=1) > 0.0
+
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        points = [
+            PointStruct(
+                id=_smiles_to_uuid(mol["smiles"]),
+                vector=emb.tolist(),
+                payload=mol,
+            )
+            for i, (mol, emb) in enumerate(
+                zip(molecules[start:end], embeddings[start:end]), start=start
+            )
+            if valid_mask[i]
+        ]
+        if points:
+            client.upsert(collection_name=COLLECTION_NAME, points=points)
 
 
 # --- Usage (assumes 'molecules' and 'embeddings' from Sections 4-5) ---
@@ -421,7 +506,6 @@ print(f"Indexed {len(molecules)} molecules in Qdrant.")
 collection_info = client.get_collection(collection_name=COLLECTION_NAME)
 print(f"Collection status: {collection_info.status}")
 print(f"Points count: {collection_info.points_count}")
-# .vectors.size works for single-vector collections (which is the structure created here)
 print(f"Vector size: {collection_info.config.params.vectors.size}")
 ```
 
@@ -430,8 +514,8 @@ print(f"Vector size: {collection_info.config.params.vectors.size}")
 When building this pipeline, I ran into a few standard headaches that I had to solve in the indexing logic:
 
 - **Handling Duplicates:** I hate accidentally duplicating records when I re-run an indexing script. By using deterministic IDs (generating a `uuid.uuid5` directly from the canonical SMILES), I guarantee that if I index the exact same molecule twice, Qdrant just overwrites the old entry securely.
-- **Collection Overwrites:** For local test runs, my `create_collection` function just drops the existing index and starts fresh. Obviously, I wrap this in strict guards when moving to production.
-- **Memory Management:** Attempting to embed and upload massive sets at once will quickly fry local memory. In the real API flow, I always chunk upserts into manageable batches.
+- **Non-Destructive Collection Creation:** The `create_collection` function checks if the collection already exists and reuses it as long as the vector dimensions match. This prevents accidental data loss during restarts. The repo also provides a separate `recreate_collection` function for when a destructive reset is explicitly intended.
+- **Batch Upserts:** Attempting to embed and upload massive sets at once will quickly fry local memory. Upserts are chunked into batches (defaulting to 1000 points per call), and each batch validates that vectors are finite and non-zero before sending them to Qdrant.
 - **Payload Indexing:** Because I heavily rely on metadata filtering (like capping toxicity scores), I explicitly tell Qdrant to create internal indexes for those specific float values. If you skip this manual indexing step, your filtered searches will grind to a halt on large datasets.
 
 ```python
@@ -625,48 +709,72 @@ A local Python script is great for testing, but eventually, I need to plug this 
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rdkit import Chem
 
-# Import the modules defined in earlier sections.
-# Save Section 4 as molecule_processor.py, Section 5 as embedder.py,
-# and Section 6/7 as qdrant_indexer.py, or use the repo files directly.
-from config import SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
-from embedder import MoleculeEmbedder
-from molecule_processor import process_smiles_batch
-from qdrant_indexer import (
+from molsearch.config import MAX_SMILES_LENGTH, SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
+from molsearch.embedder import MoleculeEmbedder
+from molsearch.molecule_processor import process_smiles_batch
+from molsearch.qdrant_indexer import (
+    check_system_health,
+    collection_exists_and_populated,
     create_collection,
+    create_payload_indexes,
     get_qdrant_client,
     search_similar_molecules,
     upsert_molecules,
 )
 
-# Module-level references populated during lifespan
-_embedder = None
+logger = logging.getLogger(__name__)
+
+_embedder: MoleculeEmbedder | None = None
 _client = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize embedder and Qdrant on startup, populate demo index."""
+    """Startup: load model, connect Qdrant, seed demo data if empty."""
     global _embedder, _client
-    _embedder = MoleculeEmbedder()
-    _client = get_qdrant_client()
 
-    # Populate demo index with toxicity scores so /search works out of the box
-    molecules = process_smiles_batch(
-        SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
-    )
-    smiles_list = [m["smiles"] for m in molecules]
-    embeddings = _embedder.embed(smiles_list)
-    create_collection(_client)
-    upsert_molecules(_client, molecules, embeddings)
+    try:
+        logger.info("Loading ChemBERTa model...")
+        _embedder = MoleculeEmbedder()
+    except Exception as exc:
+        logger.error("Failed to load embedder: %s", exc)
+        _embedder = None
+
+    try:
+        logger.info("Initializing Qdrant...")
+        _client = get_qdrant_client()
+
+        create_collection(_client)
+        create_payload_indexes(_client)
+
+        if not collection_exists_and_populated(_client):
+            if _embedder is not None:
+                molecules = process_smiles_batch(
+                    SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
+                )
+                smiles_list = [m["smiles"] for m in molecules]
+                embeddings = _embedder.embed(smiles_list)
+                upsert_molecules(_client, molecules, embeddings)
+                logger.info("Indexed %d demo molecules.", len(molecules))
+            else:
+                logger.warning("Embedder not available; skipping demo indexing.")
+        else:
+            logger.info("Collection already populated - skipping demo indexing.")
+    except Exception as exc:
+        logger.error("Failed to initialize Qdrant: %s", exc)
+        _client = None
+
     yield
+
     _client = None
     _embedder = None
 
@@ -678,29 +786,51 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# NOTE: In production, connect to a persistent Qdrant instance:
-# QdrantClient(host="localhost", port=6333)
-
 
 class SearchRequest(BaseModel):
-    smiles: str
-    top_k: int = 5
-    mw_max: Optional[float] = None
-    logp_max: Optional[float] = None
-    toxicity_max: Optional[float] = None
+    """Request body for the /search endpoint."""
+
+    smiles: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_SMILES_LENGTH,
+        description="SMILES string of the query molecule",
+    )
+    top_k: int = Field(default=5, ge=1, le=100, description="Number of results")
+    mw_max: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="Max molecular weight filter",
+    )
+    logp_max: float | None = Field(
+        default=None,
+        allow_inf_nan=False,
+        description="Max LogP filter",
+    )
+    toxicity_max: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="Max toxicity score filter",
+    )
 
 
 class MoleculeHit(BaseModel):
+    """A single search result."""
+
     smiles: str
     score: float
     molecular_weight: float
     logp: float
-    toxicity_score: Optional[float] = None
-    tanimoto_score: Optional[float] = None
-    fused_score: Optional[float] = None
+    toxicity_score: float | None = None
+    tanimoto_score: float | None = None
+    fused_score: float | None = None
 
 
 class SearchResponse(BaseModel):
+    """Response body for the /search endpoint."""
+
     query_smiles: str
     canonical_smiles: str
     results: list[MoleculeHit]
@@ -780,12 +910,12 @@ def health(response: Response):
 
 Here's the problem this API solves: embedding a SMILES string is a mathematically heavy, CPU-bound process. If I just ran it natively inside my FastAPI endpoint, it would block the entire async event loop. If multiple chemists tried to query the API at the same time, the server would lock up. 
 
-To prevent that, I use `asyncio.get_running_loop().run_in_executor()` to hand off the actual transformer inference and Qdrant search to a separate worker thread. I also threw in strict validation—like checking for empty strings, validating that numeric filters are actually finite numbers, and ensuring the SMILES isn't longer than 400 characters (because ChemBERTa's token limit will truncate massive polymers anyway).
+To prevent that, I use `asyncio.get_running_loop().run_in_executor()` to hand off the actual transformer inference and Qdrant search to a separate worker thread. The `SearchRequest` model uses Pydantic `Field` validators to enforce constraints at the schema level—`min_length`, `max_length`, `ge`, `le`, and `allow_inf_nan`—so invalid inputs never reach the search logic. The lifespan handler wraps both the embedder and Qdrant initialization in try/except blocks, so the API degrades gracefully instead of crashing if either component fails to start. It also uses `collection_exists_and_populated()` to skip demo re-indexing when the collection already has data, which matters when connecting to a persistent Qdrant instance.
 
 Run the server:
 
 ```bash
-uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn molsearch.api_server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Test with curl:
@@ -808,16 +938,15 @@ from __future__ import annotations
 
 import streamlit as st
 from rdkit import Chem
-from rdkit.Chem import Draw
+from rdkit.Chem import Descriptors, Draw
 
-# Import the modules defined in earlier sections.
-# Save Section 4 as molecule_processor.py, Section 5 as embedder.py,
-# and Section 6/7 as qdrant_indexer.py, or use the repo files directly.
-from config import SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
-from embedder import MoleculeEmbedder
-from molecule_processor import process_smiles_batch
-from qdrant_indexer import (
+from molsearch.config import SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
+from molsearch.embedder import MoleculeEmbedder
+from molsearch.molecule_processor import process_smiles_batch
+from molsearch.qdrant_indexer import (
+    collection_exists_and_populated,
     create_collection,
+    create_payload_indexes,
     get_qdrant_client,
     search_similar_molecules,
     upsert_molecules,
@@ -831,37 +960,55 @@ st.caption("Powered by ChemBERTa embeddings and Qdrant vector search")
 @st.cache_resource
 def load_resources():
     """Load the embedder and Qdrant client once, populate demo index."""
-    emb = MoleculeEmbedder()
-    qclient = get_qdrant_client()
+    embedder = MoleculeEmbedder()
+    client = get_qdrant_client()
 
-    # Populate the demo index with toxicity scores
-    molecules = process_smiles_batch(
-        SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
-    )
-    smiles_list = [m["smiles"] for m in molecules]
-    embeddings = emb.embed(smiles_list)
-    create_collection(qclient)
-    upsert_molecules(qclient, molecules, embeddings)
+    create_collection(client)
+    create_payload_indexes(client)
 
-    return emb, qclient
+    if not collection_exists_and_populated(client):
+        molecules = process_smiles_batch(
+            SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
+        )
+        smiles_list = [m["smiles"] for m in molecules]
+        embeddings = embedder.embed(smiles_list)
+        upsert_molecules(client, molecules, embeddings)
 
-# NOTE: The snippet above calls create_collection() unconditionally, which
-# wipes the index on every Streamlit reload. The full repo version guards
-# this with collection_exists_and_populated() -- see streamlit_app.py.
+    return embedder, client
+
 
 embedder, client = load_resources()
 
-query_smiles = st.text_input(
-    "Enter a SMILES string",
+
+st.sidebar.header("Search Parameters")
+
+query_smiles = st.sidebar.text_input(
+    "SMILES string",
     value="CC(=O)Oc1ccccc1C(=O)O",
     help="Enter a valid SMILES string to search for similar molecules",
 )
 
-col1, col2 = st.columns(2)
-with col1:
-    top_k = st.slider("Number of results", min_value=1, max_value=20, value=5)
-with col2:
-    mw_filter = st.number_input("Max molecular weight (0 = no filter)", value=0.0, step=50.0)
+top_k = st.sidebar.slider("Number of results", min_value=1, max_value=20, value=5)
+
+mw_filter = st.sidebar.number_input(
+    "Max molecular weight (0 = no filter)",
+    value=0.0,
+    step=50.0,
+    min_value=0.0,
+)
+
+logp_filter = st.sidebar.number_input(
+    "Max LogP (0 = no filter)",
+    value=0.0,
+    step=0.5,
+)
+
+toxicity_filter = st.sidebar.number_input(
+    "Max toxicity score (0 = no filter)",
+    value=0.0,
+    step=0.1,
+    min_value=0.0,
+)
 
 search_clicked = st.sidebar.button("Search", type="primary", use_container_width=True)
 
@@ -882,7 +1029,6 @@ if search_clicked:
             st.image(img, caption=canonical_query)
         with col_info:
             st.subheader("Query Info")
-            # RDKit descriptors are loaded dynamically and aren't visible to mypy
             st.metric("Molecular Weight", f"{Descriptors.MolWt(mol):.2f}")  # type: ignore[attr-defined]
             st.metric("LogP", f"{Descriptors.MolLogP(mol):.2f}")  # type: ignore[attr-defined]
 
@@ -890,9 +1036,6 @@ if search_clicked:
 
         mw_max = mw_filter if mw_filter > 0 else None
         logp_max = logp_filter if logp_filter > 0 else None
-        
-        # In a real app, you'd have a toxicity slider. Simulating that here:
-        toxicity_filter = 0.0 # Placeholder matching repo app sidebar
         toxicity_max = toxicity_filter if toxicity_filter > 0 else None
 
         results = search_similar_molecules(
@@ -945,7 +1088,7 @@ else:
 Run with:
 
 ```bash
-streamlit run streamlit_app.py
+streamlit run src/molsearch/streamlit_app.py
 ```
 
 ---

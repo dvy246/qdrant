@@ -35,55 +35,39 @@ def compute_toxicity_proxy(mol: Chem.Mol) -> float:
     hba = Descriptors.NumHAcceptors(mol)  # type: ignore[attr-defined]
     tpsa = Descriptors.TPSA(mol)  # type: ignore[attr-defined]
     n_aromatic = rdMolDescriptors.CalcNumAromaticRings(mol)
-    n_atoms = mol.GetNumHeavyAtoms()
 
-    # Each sub-score maps a descriptor to [0, 1] based on ranges
-    # commonly associated with drug-likeness violations.
+    # Continuous sub-scores with lower thresholds so drug-like molecules
+    # still produce meaningful variation instead of flat zeros.
 
-    # MW: drug-like < 500, concerning > 800
-    mw_score = max(0.0, min((mw - 500) / 300, 1.0)) if mw > 500 else 0.0
+    # MW: starts contributing above 350, saturates at 800
+    mw_score = max(0.0, min((mw - 350) / 450, 1.0))
 
-    # LogP: drug-like -0.4 to 5.6, concerning > 5
-    logp_score = max(0.0, min((logp - 5) / 3, 1.0)) if logp > 5 else 0.0
+    # LogP: starts above 3, saturates at 8
+    logp_score = max(0.0, min((logp - 3) / 5, 1.0))
 
-    # HBD: drug-like <= 5, concerning > 5
-    hbd_score = max(0.0, min((hbd - 5) / 5, 1.0)) if hbd > 5 else 0.0
+    # HBD: starts above 2, saturates at 7
+    hbd_score = max(0.0, min((hbd - 2) / 5, 1.0))
 
-    # HBA: drug-like <= 10, concerning > 10
-    hba_score = max(0.0, min((hba - 10) / 5, 1.0)) if hba > 10 else 0.0
+    # HBA: starts above 5, saturates at 15
+    hba_score = max(0.0, min((hba - 5) / 10, 1.0))
 
-    # Aromatic rings: > 3 raises concern (PAH-like structures)
-    arom_score = max(0.0, min((n_aromatic - 3) / 3, 1.0)) if n_aromatic > 3 else 0.0
+    # Aromatic rings: linear 0–6, most drug-like molecules have 1–3
+    arom_score = min(n_aromatic / 6, 1.0)
 
-    # TPSA: very low TPSA (< 20) can indicate membrane-disrupting compounds
-    tpsa_score = max(0.0, min((20 - tpsa) / 20, 1.0)) if tpsa < 20 else 0.0
+    # TPSA: low TPSA (< 75) increases risk — membrane disruption concern
+    tpsa_score = max(0.0, min((75 - tpsa) / 75, 1.0))
 
-    # Heavy atom count: very large molecules (> 50 atoms) correlate with toxicity
-    size_score = max(0.0, min((n_atoms - 50) / 30, 1.0)) if n_atoms > 50 else 0.0
-
-    # Weighted combination — MW and LogP dominate since they are the
-    # strongest predictors of ADMET liability in simple rule-based models.
-    weights = {
-        "mw": 0.25,
-        "logp": 0.25,
-        "hbd": 0.10,
-        "hba": 0.10,
-        "arom": 0.15,
-        "tpsa": 0.05,
-        "size": 0.10,
-    }
-
+    # Weighted combination
     raw = (
-        weights["mw"] * mw_score
-        + weights["logp"] * logp_score
-        + weights["hbd"] * hbd_score
-        + weights["hba"] * hba_score
-        + weights["arom"] * arom_score
-        + weights["tpsa"] * tpsa_score
-        + weights["size"] * size_score
+        0.25 * mw_score
+        + 0.25 * logp_score
+        + 0.15 * hbd_score
+        + 0.15 * hba_score
+        + 0.10 * arom_score
+        + 0.10 * tpsa_score
     )
 
-    return round(max(0.0, min(raw, 1.0)), 4)
+    return round(max(0.0, min(raw, 1.0)), 3)
 
 
 def validate_and_canonicalize(

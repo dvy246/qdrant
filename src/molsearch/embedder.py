@@ -114,10 +114,22 @@ class MoleculeEmbedder:
             end = min(start + batch_size, n)
             batch = smiles_list[start:end]
 
-            if any(len(s) > 400 for s in batch):
-                logger.error("batch %d-%d: smiles too long, skipping", start, end)
-                result[start:end] = np.nan
-                continue
+            # Skip oversized SMILES individually instead of rejecting the whole batch
+            oversized = [i for i, s in enumerate(batch) if len(s) > 400]
+            if oversized:
+                for idx in oversized:
+                    logger.warning(
+                        "smiles at index %d too long (%d chars), skipping",
+                        start + idx,
+                        len(batch[idx]),
+                    )
+                    result[start + idx] = np.nan
+                safe_indices = [i for i in range(len(batch)) if i not in oversized]
+                if not safe_indices:
+                    continue
+                batch = [batch[i] for i in safe_indices]
+            else:
+                safe_indices = list(range(len(batch)))
 
             try:
                 encoded = self.tokenizer(
@@ -156,7 +168,8 @@ class MoleculeEmbedder:
                     result[start:end] = np.nan
                     continue
 
-                result[start:end] = batch_result
+                for out_i, safe_i in enumerate(safe_indices):
+                    result[start + safe_i] = batch_result[out_i]
 
             except torch.cuda.OutOfMemoryError:
                 logger.error("batch %d-%d: OOM, recovering", start, end)

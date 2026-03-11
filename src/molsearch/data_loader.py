@@ -23,10 +23,7 @@ from molsearch.config import DATA_CACHE_DIR, DATASET_SIZE
 
 logger = logging.getLogger(__name__)
 
-ZINC_250K_URL = (
-    "https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/"
-    "master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv"
-)
+ZINC_250K_URL = "https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv"
 
 ZINC_FILENAME = "zinc_250k.csv"
 

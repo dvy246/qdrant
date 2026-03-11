@@ -62,24 +62,27 @@ query_smiles = st.sidebar.text_input(
 
 top_k = st.sidebar.slider("Number of results", min_value=1, max_value=20, value=5)
 
-mw_filter = st.sidebar.number_input(
-    "Max molecular weight (0 = no filter)",
-    value=0.0,
-    step=50.0,
-    min_value=0.0,
+use_mw_filter = st.sidebar.checkbox("Filter by molecular weight")
+mw_filter = (
+    st.sidebar.number_input(
+        "Max molecular weight", value=500.0, step=50.0, min_value=0.0
+    )
+    if use_mw_filter
+    else None
 )
 
-logp_filter = st.sidebar.number_input(
-    "Max LogP (0 = no filter)",
-    value=0.0,
-    step=0.5,
+use_logp_filter = st.sidebar.checkbox("Filter by LogP")
+logp_filter = (
+    st.sidebar.number_input("Max LogP", value=5.0, step=0.5)
+    if use_logp_filter
+    else None
 )
 
-toxicity_filter = st.sidebar.number_input(
-    "Max toxicity score (0 = no filter)",
-    value=0.0,
-    step=0.1,
-    min_value=0.0,
+use_tox_filter = st.sidebar.checkbox("Filter by toxicity")
+toxicity_filter = (
+    st.sidebar.number_input("Max toxicity score", value=0.5, step=0.1, min_value=0.0)
+    if use_tox_filter
+    else None
 )
 
 search_clicked = st.sidebar.button("Search", type="primary", use_container_width=True)
@@ -107,9 +110,9 @@ if search_clicked:
 
         st.divider()
 
-        mw_max = mw_filter if mw_filter > 0 else None
-        logp_max = logp_filter if logp_filter > 0 else None
-        toxicity_max = toxicity_filter if toxicity_filter > 0 else None
+        mw_max = mw_filter
+        logp_max = logp_filter
+        toxicity_max = toxicity_filter
 
         results = search_similar_molecules(
             query_smiles=canonical_query,

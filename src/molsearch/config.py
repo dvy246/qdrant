@@ -79,28 +79,10 @@ UPSERT_BATCH_SIZE: int = _env_int("MOLSEARCH_UPSERT_BATCH_SIZE", 1000)
 MAX_SMILES_LENGTH: int = _env_int("MOLSEARCH_MAX_SMILES_LENGTH", 2048)
 
 
-SAMPLE_SMILES: list[str] = [
-    "CC(=O)Oc1ccccc1C(=O)O",  # Aspirin
-    "CC(C)Cc1ccc(cc1)C(C)C(=O)O",  # Ibuprofen
-    "CC(=O)Nc1ccc(O)cc1",  # Acetaminophen
-    "O=C(O)Cc1ccccc1Nc1c(Cl)cccc1Cl",  # Diclofenac
-    "COc1ccc2cc(CC(C)C(=O)O)ccc2c1",  # Naproxen
-    "OC(=O)c1ccccc1O",  # Salicylic acid
-    "c1ccc(cc1)C(=O)O",  # Benzoic acid
-    "CC12CCC3C(C1CCC2O)CCC4=CC(=O)CCC34C",  # Testosterone
-    "OC(=O)c1cc(O)c(O)c(O)c1",  # Gallic acid
-    "c1ccc2c(c1)ccc1ccccc12",  # Naphthalene
-]
+# Dataset configuration
+DATASET_SIZE: int = _env_int("MOLSEARCH_DATASET_SIZE", 2000)
 
-SAMPLE_TOXICITY_SCORES: list[float] = [
-    0.18,  # Aspirin
-    0.15,  # Ibuprofen
-    0.48,  # Acetaminophen (liver toxicity at high doses)
-    0.37,  # Diclofenac
-    0.22,  # Naproxen
-    0.31,  # Salicylic acid
-    0.14,  # Benzoic acid
-    0.72,  # Testosterone
-    0.08,  # Gallic acid
-    0.61,  # Naphthalene
-]
+DATA_CACHE_DIR: str = _env_str(
+    "MOLSEARCH_DATA_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "molsearch"),
+)

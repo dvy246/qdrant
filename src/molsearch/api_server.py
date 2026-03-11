@@ -20,7 +20,8 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
-from molsearch.config import MAX_SMILES_LENGTH, SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
+from molsearch.config import MAX_SMILES_LENGTH
+from molsearch.data_loader import load_dataset
 from molsearch.embedder import MoleculeEmbedder
 from molsearch.molecule_processor import process_smiles_batch
 from molsearch.qdrant_indexer import (
@@ -42,7 +43,7 @@ _client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: load model, connect Qdrant, seed demo data if empty."""
+    """Startup: load model, connect Qdrant, seed data if empty."""
     global _embedder, _client
 
     try:
@@ -61,13 +62,13 @@ async def lifespan(app: FastAPI):
 
         if not collection_exists_and_populated(_client):
             if _embedder is not None:
+                smiles_list, toxicity_scores = load_dataset()
                 molecules = process_smiles_batch(
-                    SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
+                    smiles_list, toxicity_scores=toxicity_scores
                 )
-                smiles_list = [m["smiles"] for m in molecules]
-                embeddings = _embedder.embed(smiles_list)
+                embeddings = _embedder.embed([m["smiles"] for m in molecules])
                 upsert_molecules(_client, molecules, embeddings)
-                logger.info("Indexed %d demo molecules.", len(molecules))
+                logger.info("Indexed %d molecules.", len(molecules))
             else:
                 logger.warning("Embedder not available; skipping demo indexing.")
         else:

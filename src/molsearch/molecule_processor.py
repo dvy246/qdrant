@@ -8,9 +8,82 @@ import logging
 import math
 
 from rdkit import Chem
-from rdkit.Chem import Descriptors
+from rdkit.Chem import Descriptors, rdMolDescriptors
 
 logger = logging.getLogger(__name__)
+
+
+def compute_toxicity_proxy(mol: Chem.Mol) -> float:
+    """
+    Estimate a heuristic toxicity score from RDKit descriptors.
+
+    This is NOT a real toxicity prediction. It is a rule-based proxy
+    derived from molecular properties commonly associated with toxicity
+    risk (Lipinski violations, high aromaticity, extreme LogP, etc.).
+
+    The score is deterministic, fast, and uses no external dependencies.
+
+    Args:
+        mol: An RDKit Mol object.
+
+    Returns:
+        A float between 0.0 (low estimated risk) and 1.0 (high estimated risk).
+    """
+    mw = Descriptors.MolWt(mol)  # type: ignore[attr-defined]
+    logp = Descriptors.MolLogP(mol)  # type: ignore[attr-defined]
+    hbd = Descriptors.NumHDonors(mol)  # type: ignore[attr-defined]
+    hba = Descriptors.NumHAcceptors(mol)  # type: ignore[attr-defined]
+    tpsa = Descriptors.TPSA(mol)  # type: ignore[attr-defined]
+    n_aromatic = rdMolDescriptors.CalcNumAromaticRings(mol)
+    n_atoms = mol.GetNumHeavyAtoms()
+
+    # Each sub-score maps a descriptor to [0, 1] based on ranges
+    # commonly associated with drug-likeness violations.
+
+    # MW: drug-like < 500, concerning > 800
+    mw_score = max(0.0, min((mw - 500) / 300, 1.0)) if mw > 500 else 0.0
+
+    # LogP: drug-like -0.4 to 5.6, concerning > 5
+    logp_score = max(0.0, min((logp - 5) / 3, 1.0)) if logp > 5 else 0.0
+
+    # HBD: drug-like <= 5, concerning > 5
+    hbd_score = max(0.0, min((hbd - 5) / 5, 1.0)) if hbd > 5 else 0.0
+
+    # HBA: drug-like <= 10, concerning > 10
+    hba_score = max(0.0, min((hba - 10) / 5, 1.0)) if hba > 10 else 0.0
+
+    # Aromatic rings: > 3 raises concern (PAH-like structures)
+    arom_score = max(0.0, min((n_aromatic - 3) / 3, 1.0)) if n_aromatic > 3 else 0.0
+
+    # TPSA: very low TPSA (< 20) can indicate membrane-disrupting compounds
+    tpsa_score = max(0.0, min((20 - tpsa) / 20, 1.0)) if tpsa < 20 else 0.0
+
+    # Heavy atom count: very large molecules (> 50 atoms) correlate with toxicity
+    size_score = max(0.0, min((n_atoms - 50) / 30, 1.0)) if n_atoms > 50 else 0.0
+
+    # Weighted combination — MW and LogP dominate since they are the
+    # strongest predictors of ADMET liability in simple rule-based models.
+    weights = {
+        "mw": 0.25,
+        "logp": 0.25,
+        "hbd": 0.10,
+        "hba": 0.10,
+        "arom": 0.15,
+        "tpsa": 0.05,
+        "size": 0.10,
+    }
+
+    raw = (
+        weights["mw"] * mw_score
+        + weights["logp"] * logp_score
+        + weights["hbd"] * hbd_score
+        + weights["hba"] * hba_score
+        + weights["arom"] * arom_score
+        + weights["tpsa"] * tpsa_score
+        + weights["size"] * size_score
+    )
+
+    return round(max(0.0, min(raw, 1.0)), 4)
 
 
 def validate_and_canonicalize(
@@ -75,6 +148,8 @@ def validate_and_canonicalize(
         if not math.isfinite(toxicity_score):
             raise ValueError("toxicity_score must be a finite float")
         payload["toxicity_score"] = float(toxicity_score)
+    else:
+        payload["toxicity_score"] = compute_toxicity_proxy(mol)
 
     return payload
 

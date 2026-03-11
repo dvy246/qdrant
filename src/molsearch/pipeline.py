@@ -11,7 +11,8 @@ import logging
 
 import numpy as np
 
-from molsearch.config import COLLECTION_NAME, SAMPLE_SMILES, SAMPLE_TOXICITY_SCORES
+from molsearch.config import COLLECTION_NAME
+from molsearch.data_loader import load_dataset
 from molsearch.embedder import MoleculeEmbedder
 from molsearch.molecule_processor import process_smiles_batch
 from molsearch.qdrant_indexer import (
@@ -28,10 +29,11 @@ logger = logging.getLogger(__name__)
 def main():
     """Run the full molecule search pipeline."""
 
-    logger.info("Processing SMILES...")
-    molecules = process_smiles_batch(
-        SAMPLE_SMILES, toxicity_scores=SAMPLE_TOXICITY_SCORES
-    )
+    logger.info("Loading dataset...")
+    smiles_list, toxicity_scores = load_dataset()
+
+    logger.info("Processing %d SMILES...", len(smiles_list))
+    molecules = process_smiles_batch(smiles_list, toxicity_scores=toxicity_scores)
     logger.info("  %d valid molecules.\n", len(molecules))
 
     logger.info("Generating ChemBERTa embeddings...")

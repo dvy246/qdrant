@@ -134,6 +134,22 @@ curl -X POST http://localhost:8000/search \
 curl http://localhost:8000/health
 ```
 
+## Dataset
+
+The system uses real molecules from the **ZINC-250k** dataset — a curated subset of 249,456 drug-like compounds from the [ZINC database](https://zinc.docking.org/). This is the same database that ChemBERTa was trained on, making it a natural fit for the embedding pipeline.
+
+On first startup, the dataset is automatically downloaded from a stable GitHub mirror and cached locally at `~/.cache/molsearch/zinc_250k.csv`. Subsequent runs use the cached copy. By default, the first **2,000** valid, deduplicated molecules are loaded and indexed.
+
+To adjust the dataset size:
+
+```bash
+export MOLSEARCH_DATASET_SIZE=5000  # index 5,000 molecules instead of 2,000
+```
+
+If the download fails (e.g., in an offline CI environment), the system falls back to a small built-in list of 10 well-known drug molecules so the pipeline can still run.
+
+**Why real data instead of hardcoded samples:** Hardcoded molecule lists are fine for unit tests but tell you nothing about how the system behaves on realistic chemical diversity. Using ZINC gives meaningful search results, realistic embedding distributions, and a proper stress test of the indexing and retrieval pipeline.
+
 ## Configuration
 
 `src/molsearch/config.py` supports defaults plus environment overrides:
@@ -147,6 +163,8 @@ curl http://localhost:8000/health
 - `MOLSEARCH_PERSISTENT_QDRANT`
 - `MOLSEARCH_UPSERT_BATCH_SIZE`
 - `MOLSEARCH_MAX_SMILES_LENGTH`
+- `MOLSEARCH_DATASET_SIZE` — number of molecules to load from ZINC (default: 2000)
+- `MOLSEARCH_DATA_CACHE_DIR` — local cache directory (default: `~/.cache/molsearch`)
 
 ## Docker
 
@@ -162,7 +180,7 @@ This starts:
 
 - `create_collection()` is intentionally non-destructive and reuses existing collections.
 - Use `recreate_collection()` only when an explicit destructive reset is intended.
-- For production datasets, provide assay-derived `toxicity_score` values during ingestion; the project does not fabricate toxicity labels.
+- The ZINC-250k dataset does not include toxicity labels. A descriptor-based heuristic proxy is computed automatically from RDKit properties (MW, LogP, HBD, HBA, aromatic ring count, TPSA, heavy atom count). This is **not** a real toxicity prediction — it is a rule-based estimate for demonstration purposes. For production use, provide assay-derived `toxicity_score` values during ingestion.
 
 ## License
 
